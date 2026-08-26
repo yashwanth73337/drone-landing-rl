@@ -1,0 +1,9 @@
+drone-landing-rl-venv/
+__pycache__/
+*.pyc
+results/
+models/
+*.zip
+*.pth
+wandb/
+.vscode/
