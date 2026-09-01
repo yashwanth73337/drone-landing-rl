@@ -14,66 +14,60 @@ environment records vertical speed, lateral relative speed, tilt, and offset
 at the moment of contact. Those are the headline metrics of this thesis.
 
 
-THE BUG THAT CAUSED EIGHT FAILED REWARD VARIANTS
-------------------------------------------------
-gym_pybullet_drones.BaseAviary.step() evaluates in this order:
+TWO BUGS THAT SHAPED THIS FILE
+------------------------------
 
-    obs        = self._computeObs()
-    reward     = self._computeReward()        <-- FIRST
-    terminated = self._computeTerminated()    <-- calls _checkTouchdown()
-    truncated  = self._computeTruncated()
-    info       = self._computeInfo()
+1. THE ORDERING BUG (fixed in v6)
 
-_checkTouchdown() is what sets self.touchdown_recorded = True. But it runs
-INSIDE _computeTerminated(), which is called AFTER _computeReward().
+   gym_pybullet_drones.BaseAviary.step() evaluates in this order:
 
-So on the step where the drone actually reaches the pad, _computeReward()
-still sees touchdown_recorded == False, skips the bonus block entirely, and
-returns a normal shaping reward. The episode then terminates, so there is no
-next step in which the bonus could be paid.
+       obs        = self._computeObs()
+       reward     = self._computeReward()        <-- FIRST
+       terminated = self._computeTerminated()    <-- calls _checkTouchdown()
 
-The landing bonus was NEVER awarded. Not once, at any value.
+   _checkTouchdown() sets self.touchdown_recorded = True, but it only ran
+   inside _computeTerminated(), which is called AFTER _computeReward().
 
-The agent therefore had no evidence that landing was worth anything, and
-correctly learned to hover instead. Eight reward variants (bonus 100 -> 800,
-time penalties, descent ratchets) all failed for this single reason.
+   So on the step where the drone reached the pad, _computeReward() still saw
+   touchdown_recorded == False, skipped the bonus block, and returned an
+   ordinary shaping reward. The episode then ended, so there was no later step
+   in which the bonus could be paid.
 
-FIX: _computeReward() now calls _checkTouchdown() itself, before evaluating
-the bonus. _checkTouchdown() is idempotent — it returns early if already
-recorded — so calling it from both places is safe.
+   The landing bonus was NEVER awarded, at any value. Eight consecutive reward
+   variants failed for this single reason. Fix: _computeReward() now calls
+   _checkTouchdown() itself, before evaluating the bonus. The method is
+   idempotent, so calling it from both places is safe.
 
+2. PHASE MEMORISATION (fixed in v7, this version)
 
-Reward design history
----------------------
-v1  bonus 100, time penalty -0.5   -> hovered. (bonus never paid)
-v2  bonus 600, descent x3          -> hovered. (bonus never paid)
-v3  time penalty -2.0              -> self-terminated in 4 steps.
-v4  progress term, bonus 200       -> hovered at 0.26 m, centred to 5 mm.
-v4b bonus 800, weights cut         -> hovered at 0.28 m, tracking degraded.
-v5  descent ratchet 0.15           -> oscillated 0.17 <-> 0.32 m.
-v5b ratchet 0.05, flat +300        -> still hovered.
-v6  (this version) ORDERING BUG FIXED.
+   With fixed A and omega, and every episode starting at t = 0, the platform
+   is at a fully predictable position at every timestep. Nothing forces the
+   policy to use its relative-position observation — memorising a timed
+   routine ("at step 60, move here") scores just as well and is easier to
+   learn.
 
+   That is exactly what happened. A sweep over platform frequency produced
+   NON-MONOTONIC success:
 
-Difficulty settings
--------------------
-The defaults below are EASY MODE, to establish that landing is learnable at
-all before adding difficulty back:
+       omega   accel      success
+       0.200   0.050        0%      <- GENTLER than trained, still fails
+       0.500   0.125      100%      <- trained value
+       0.800   0.200        0%
+       1.200   0.300        0%
+       1.800   0.450      100%      <- near a harmonic of the trained rhythm
+       2.800   0.700        0%
 
-    platform_amplitude = 0.0   (stationary platform)
-    platform_size      = 0.50  (1 m wide pad)
-    start_height       = 0.4   (only 30 cm to descend)
+   A physical limit produces a clean threshold. Success that comes and goes
+   with frequency is a timing artefact, not a capability limit. The 100%
+   success reported earlier was measuring memorisation, not tracking.
 
-Once this lands reliably, walk the difficulty back up ONE parameter at a
-time, retraining from the previous policy each time:
+   Fix: platform motion parameters are RESAMPLED EVERY EPISODE. Amplitude,
+   frequency, and phase offset are all randomised, so no fixed schedule can
+   succeed and the only way to score is to actually use the observation.
 
-    1. start_height       0.4  -> 0.8
-    2. platform_size      0.50 -> 0.20
-    3. platform_amplitude 0.0  -> 0.5    (platform starts moving)
-
-That staged progression is the curriculum. Goldschmid & Ahmad's ablation
-found sequential curriculum with transfer reached 99% success in 118 min,
-while training on the full task directly reached 57% in 520 min.
+   Expect success rate to DROP relative to the fixed-motion version. That drop
+   is the honest number. Shin et al. (RA-L 2026) randomise platform motion
+   during training for precisely this reason.
 """
 
 import numpy as np
@@ -85,7 +79,7 @@ from gym_pybullet_drones.utils.enums import DroneModel, Physics, ActionType, Obs
 
 
 class LandingAviary(BaseRLAviary):
-    """Single agent RL problem: land on a (possibly moving) platform."""
+    """Single agent RL problem: land on a moving platform."""
 
     def __init__(self,
                  drone_model: DroneModel = DroneModel.CF2X,
@@ -98,16 +92,29 @@ class LandingAviary(BaseRLAviary):
                  record=False,
                  obs: ObservationType = ObservationType.KIN,
                  act: ActionType = ActionType.RPM,
-                 platform_amplitude: float = 0.5,   # 0.0 = stationary. Raise to 0.5 later.
-                 platform_omega: float = 0.5,
-                 platform_size: float = 0.20,       # half-width. 0.50 = 1 m pad. Shrink to 0.20 later.
+                 # --- platform motion ---------------------------------
+                 # Ranges, resampled every episode. Set randomize_platform
+                 # to False and pass fixed values to evaluate one setting.
+                 randomize_platform: bool = True,
+                 amplitude_range=(0.2, 1.0),
+                 omega_range=(0.2, 1.5),
+                 platform_amplitude: float = 0.5,   # used when randomize=False
+                 platform_omega: float = 0.5,       # used when randomize=False
+                 platform_size: float = 0.20,
                  platform_height: float = 0.10,
-                 start_height: float = 0.8,         # raise to 0.8 later
+                 start_height: float = 0.8,
                  ratchet_slack: float = 0.10,
                  ):
 
+        self.RANDOMIZE_PLATFORM = randomize_platform
+        self.AMPLITUDE_RANGE = amplitude_range
+        self.OMEGA_RANGE = omega_range
+
+        # Current episode's values. Overwritten each reset when randomising.
         self.PLAT_AMPLITUDE = platform_amplitude
         self.PLAT_OMEGA = platform_omega
+        self.PLAT_PHASE = 0.0
+
         self.PLAT_SIZE = platform_size
         self.PLAT_HEIGHT = platform_height
         self.START_HEIGHT = start_height
@@ -151,24 +158,47 @@ class LandingAviary(BaseRLAviary):
     # THE PLATFORM
     # ------------------------------------------------------------------
 
+    def _samplePlatformMotion(self):
+        """Draw new motion parameters for this episode.
+
+        Randomising AMPLITUDE, FREQUENCY, and PHASE together means:
+
+          - amplitude   -> the platform travels a different distance
+          - frequency   -> it reverses at a different rate
+          - phase       -> it is somewhere different at t = 0, and moving in
+                           a different direction
+
+        Phase matters most. Without it, every episode begins with the platform
+        at x = 0 moving in the +x direction, which is itself a memorisable cue.
+        """
+        if not self.RANDOMIZE_PLATFORM:
+            return
+
+        rng = self.np_random if hasattr(self, 'np_random') else np.random
+
+        self.PLAT_AMPLITUDE = float(rng.uniform(*self.AMPLITUDE_RANGE))
+        self.PLAT_OMEGA = float(rng.uniform(*self.OMEGA_RANGE))
+        self.PLAT_PHASE = float(rng.uniform(0.0, 2.0 * np.pi))
+
     def _getPlatformPos(self):
         """Centre of the pad SURFACE right now."""
         t = self.step_counter / self.PYB_FREQ
-        x = self.PLAT_AMPLITUDE * np.sin(self.PLAT_OMEGA * t)
+        x = self.PLAT_AMPLITUDE * np.sin(self.PLAT_OMEGA * t + self.PLAT_PHASE)
         return np.array([x, 0.0, self.PLAT_HEIGHT])
 
     def _getPlatformVel(self):
         """Platform velocity right now."""
         t = self.step_counter / self.PYB_FREQ
-        vx = self.PLAT_AMPLITUDE * self.PLAT_OMEGA * np.cos(self.PLAT_OMEGA * t)
+        vx = (self.PLAT_AMPLITUDE * self.PLAT_OMEGA
+              * np.cos(self.PLAT_OMEGA * t + self.PLAT_PHASE))
         return np.array([vx, 0.0, 0.0])
 
     def _updatePlatform(self):
-        """Create the pad if needed, then teleport it along the sine wave.
+        """Create the pad if needed, then teleport it along its trajectory.
 
-        Mass 0 makes it KINEMATIC: physics never pushes it, but it still has
-        a collision shape so the drone can rest on it. Created even without
-        the GUI, because the drone must be able to physically touch it.
+        Mass 0 makes it KINEMATIC: physics never pushes it, but it still has a
+        collision shape so the drone can rest on it. Created even without the
+        GUI, because the drone must be able to physically touch it.
         """
         pos = self._getPlatformPos()
 
@@ -196,8 +226,11 @@ class LandingAviary(BaseRLAviary):
             )
 
     def reset(self, seed=None, options=None):
-        """BaseAviary wipes the simulation, so clear the pad id, the ratchet,
-        and all touchdown records."""
+        """Reset the episode.
+
+        BaseAviary wipes the PyBullet simulation, so the pad id must be
+        cleared. New platform motion is sampled here.
+        """
         self.PLATFORM_ID = None
         self.prev_height = None
         self.min_height_seen = None
@@ -207,7 +240,14 @@ class LandingAviary(BaseRLAviary):
         self.touchdown_tilt = None
         self.touchdown_offset = None
         self.landed_successfully = False
-        return super().reset(seed=seed, options=options)
+
+        out = super().reset(seed=seed, options=options)
+
+        # Sample AFTER super().reset(), because that is where np_random is
+        # seeded. Then rebuild the observation so it reflects the new motion.
+        self._samplePlatformMotion()
+        obs = self._computeObs()
+        return obs, out[1]
 
     # ------------------------------------------------------------------
     # TOUCHDOWN DETECTION
@@ -216,14 +256,12 @@ class LandingAviary(BaseRLAviary):
     def _checkTouchdown(self):
         """Has the drone reached the pad surface? If so, record how.
 
-        IDEMPOTENT — safe to call multiple times per step. Returns early once
-        touchdown has already been recorded. This matters because both
-        _computeReward() and _computeTerminated() now call it.
+        IDEMPOTENT — safe to call more than once per step. Both
+        _computeReward() and _computeTerminated() call it.
 
         Touchdown is defined as a CONDITION on height rather than waiting for
         the physics engine to report contact. Contact detection depends on
-        collision-mesh detail and is noisy; a height threshold is reproducible
-        and easy to justify in a report.
+        collision-mesh detail and is not reproducible; a height threshold is.
         """
         if self.touchdown_recorded:
             return True
@@ -272,6 +310,10 @@ class LandingAviary(BaseRLAviary):
         Relative, because that is what real sensing gives you. UWB reports a
         range to the platform; an ArUco marker reports a pose relative to the
         camera. The drone never receives world coordinates.
+
+        With randomised motion these six numbers are the ONLY way to locate
+        the platform. That is the point: it forces the policy to be a feedback
+        controller rather than a timed routine.
         """
         self._updatePlatform()
 
@@ -299,9 +341,9 @@ class LandingAviary(BaseRLAviary):
             by standing still.
 
             Gated on horizontal alignment: progress only pays while within
-            1.5 pad-widths. This is the commit-timing decision, and it is
-            what makes landing harder than tracking — the drone must get
-            over the pad FIRST, then come down.
+            1.5 pad-widths. This is the commit-timing decision, and it is what
+            makes landing harder than tracking — the drone must get over the
+            pad FIRST, then come down.
 
         ALIGNMENT — exp(-3 * horizontal distance)
 
@@ -319,13 +361,10 @@ class LandingAviary(BaseRLAviary):
 
         TOUCHDOWN BONUS — 300 flat, plus up to 800 scaled by quality
 
-            The flat 300 pays for REACHING the pad at all. Without it, a
-            mediocre landing scores less than continued hovering, so the
-            policy never experiences a good outcome and cannot learn that
-            landing is worthwhile.
-
-            The scaled part is softness x centred x level, so landing WELL
-            is still worth far more than landing badly.
+            The flat 300 pays for REACHING the pad at all. Without it a
+            mediocre landing scores less than continued hovering, so the policy
+            never experiences a good outcome and cannot learn that landing is
+            worthwhile.
 
         Returns
         -------
@@ -333,10 +372,8 @@ class LandingAviary(BaseRLAviary):
         """
         # CRITICAL: BaseAviary.step() calls _computeReward() BEFORE
         # _computeTerminated(), and _checkTouchdown() lives in the latter.
-        # Without this line the bonus block below never fires on the
-        # touchdown step, and since the episode then ends, the bonus is
-        # never paid at all. This single ordering issue caused eight
-        # consecutive reward variants to fail.
+        # Without this line the bonus below never fires on the touchdown step,
+        # and the episode then ends, so the bonus is never paid at all.
         self._checkTouchdown()
 
         state = self._getDroneStateVector(0)
@@ -348,14 +385,11 @@ class LandingAviary(BaseRLAviary):
         horiz_dist = float(np.linalg.norm(drone_pos[0:2] - plat_pos[0:2]))
         height_above = float(drone_pos[2] - plat_pos[2])
 
-        # --- alignment ------------------------------------------------
         align = np.exp(-3.0 * horiz_dist)
 
-        # --- velocity matching ----------------------------------------
         rel_vel = drone_vel - plat_vel
         vel_match = 0.5 * np.exp(-2.0 * np.linalg.norm(rel_vel[0:2]))
 
-        # --- progress, gated on alignment -----------------------------
         if self.prev_height is None:
             progress = 0.0
         elif horiz_dist < self.PLAT_SIZE * 1.5:
@@ -364,11 +398,9 @@ class LandingAviary(BaseRLAviary):
             progress = 0.0
         self.prev_height = height_above
 
-        # --- tilt penalty ---------------------------------------------
         tilt = float(np.linalg.norm(state[7:9]))
         tilt_pen = -0.3 * tilt
 
-        # --- terminal bonus -------------------------------------------
         bonus = 0.0
         if self.touchdown_recorded and self.landed_successfully:
             softness = np.exp(-3.0 * self.touchdown_vz)
@@ -390,9 +422,10 @@ class LandingAviary(BaseRLAviary):
         """Failure, or out of time."""
         state = self._getDroneStateVector(0)
 
-        bound = 1.0 + self.PLAT_AMPLITUDE
+        # Arena scales with the largest amplitude the platform can be given,
+        # so the bound does not change between episodes.
+        bound = 1.0 + self.AMPLITUDE_RANGE[1]
 
-        # flew out of the arena
         if abs(state[0]) > bound or abs(state[1]) > 1.0 or state[2] > 2.0:
             return True
 
@@ -403,25 +436,27 @@ class LandingAviary(BaseRLAviary):
         # --- DESCENT RATCHET ------------------------------------------
         #
         # The drone may never be more than RATCHET_SLACK above the lowest
-        # point it has already reached. Reach 0.5 m and the ceiling becomes
-        # 0.60 m; reach 0.3 m and it becomes 0.40 m.
-        #
-        # Hovering is still legal, but it earns zero progress reward and
-        # times out with a low score, while descending reaches the bonus.
+        # point it has already reached. Hovering is still legal, but it earns
+        # zero progress reward and times out with a low score, while
+        # descending reaches the bonus.
         h = state[2] - self._getPlatformPos()[2]
         if self.min_height_seen is None or h < self.min_height_seen:
             self.min_height_seen = h
         if h > self.min_height_seen + self.RATCHET_SLACK:
             return True
 
-        # ran out of time
         if self.step_counter / self.PYB_FREQ > self.EPISODE_LEN_SEC:
             return True
 
         return False
 
     def _computeInfo(self):
-        """Per-step diagnostics, plus touchdown metrics once contact happens."""
+        """Per-step diagnostics, plus touchdown metrics once contact happens.
+
+        Platform parameters are included so evaluation can be broken down by
+        motion difficulty — with randomised motion, every episode is a
+        different test case.
+        """
         state = self._getDroneStateVector(0)
         plat_pos = self._getPlatformPos()
 
@@ -430,6 +465,10 @@ class LandingAviary(BaseRLAviary):
             "height_above_pad": float(state[2] - plat_pos[2]),
             "touchdown": self.touchdown_recorded,
             "success": self.landed_successfully,
+            "plat_amplitude": self.PLAT_AMPLITUDE,
+            "plat_omega": self.PLAT_OMEGA,
+            "plat_peak_speed": self.PLAT_AMPLITUDE * self.PLAT_OMEGA,
+            "plat_peak_accel": self.PLAT_AMPLITUDE * self.PLAT_OMEGA ** 2,
         }
 
         if self.touchdown_recorded:

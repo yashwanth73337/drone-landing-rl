@@ -1,0 +1,13 @@
+amplitude,omega,peak_speed,peak_accel,success_rate,vz_mean,lat_mean,tilt_deg_mean,offset_mean,family
+0.18,0.8333,0.15,0.125,0.0,nan,nan,nan,nan,const_accel
+0.5,0.5,0.25,0.125,100.0,0.09062605041345514,0.0761932360825972,0.5204344982010243,0.0389608894742233,const_accel
+1.28,0.3125,0.4,0.125,0.0,nan,nan,nan,nan,const_accel
+2.88,0.2083,0.6,0.125,0.0,nan,nan,nan,nan,const_accel
+5.12,0.1562,0.8,0.125,0.0,nan,nan,nan,nan,const_accel
+8.0,0.125,1.0,0.125,0.0,nan,nan,nan,nan,const_accel
+1.25,0.2,0.25,0.05,0.0,nan,nan,nan,nan,const_speed
+0.5,0.5,0.25,0.125,100.0,0.09062605041345514,0.0761932360825972,0.5204344982010243,0.0389608894742233,const_speed
+0.3125,0.8,0.25,0.2,0.0,nan,nan,nan,nan,const_speed
+0.2083,1.2,0.25,0.3,0.0,nan,nan,nan,nan,const_speed
+0.1389,1.8,0.25,0.45,100.0,0.13663384438226658,0.027583627469102086,1.359799098458159,0.12829198074159798,const_speed
+0.0893,2.8,0.25,0.7,0.0,nan,nan,nan,nan,const_speed
