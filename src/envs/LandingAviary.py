@@ -98,11 +98,11 @@ class LandingAviary(BaseRLAviary):
                  record=False,
                  obs: ObservationType = ObservationType.KIN,
                  act: ActionType = ActionType.RPM,
-                 platform_amplitude: float = 0.0,   # 0.0 = stationary. Raise to 0.5 later.
+                 platform_amplitude: float = 0.5,   # 0.0 = stationary. Raise to 0.5 later.
                  platform_omega: float = 0.5,
-                 platform_size: float = 0.50,       # half-width. 0.50 = 1 m pad. Shrink to 0.20 later.
+                 platform_size: float = 0.20,       # half-width. 0.50 = 1 m pad. Shrink to 0.20 later.
                  platform_height: float = 0.10,
-                 start_height: float = 0.4,         # raise to 0.8 later
+                 start_height: float = 0.8,         # raise to 0.8 later
                  ratchet_slack: float = 0.10,
                  ):
 
