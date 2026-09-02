@@ -6,68 +6,58 @@ Land a quadrotor on a moving platform.
 
 Built on gym-pybullet-drones (utiasDSL).
 
-Touchdown metrics
------------------
-Goldschmid & Ahmad (2024), TornadoDrone (2024), and Shin et al. (2026) all
-report binary success rates and nothing about HOW HARD the drone hit. This
-environment records vertical speed, lateral relative speed, tilt, and offset
-at the moment of contact. Those are the headline metrics of this thesis.
+
+WHAT THIS VERSION ADDS: A SENSING MODEL
+---------------------------------------
+Every previous version handed the policy PRIVILEGED STATE — the exact relative
+position and velocity of the platform, read straight out of the simulator,
+noiseless and always available. A real drone cannot measure that.
+
+This version models the lab's actual sensing stack:
+
+  UWB (ultra-wideband radio ranging)
+      Works at any range and any attitude. But noisy (decimetre-level), slow
+      to update (~20 Hz), and occasionally throws an NLOS outlier.
+
+  ArUco fiducial marker + downward camera
+      Centimetre accurate. But only works while the marker is inside the
+      camera's field of view.
+
+The critical detail is geometric. A downward camera at height h sees a ground
+footprint of roughly 2h. A marker of side s therefore leaves the frame at about
+h = s. For a 20-50 cm marker, the drone is BLIND FOR THE FINAL 20-60 CM OF
+EVERY LANDING — precisely when precision matters most.
+
+The marker is also lost at high tilt, and detection drops frames during fast
+motion.
+
+Set `use_sensor_model=False` to recover the old privileged-state behaviour for
+comparison. That switch is the ablation.
+
+Expect success to FALL relative to privileged state. The current policy is a
+plain MLP with no memory: it sees only the present instant, so when the marker
+vanishes it has nothing to fall back on. Recovering that loss with a recurrent
+policy is the contribution.
 
 
-TWO BUGS THAT SHAPED THIS FILE
-------------------------------
+PRIOR BUGS FIXED IN THIS FILE
+-----------------------------
 
-1. THE ORDERING BUG (fixed in v6)
+1. ORDERING BUG (v6). gym_pybullet_drones.BaseAviary.step() calls
+   _computeReward() BEFORE _computeTerminated(), and _checkTouchdown() — which
+   sets touchdown_recorded — lived only in the latter. So on the touchdown step
+   the reward function saw touchdown_recorded == False, skipped the bonus, and
+   the episode then ended. The landing bonus was NEVER paid, at any value.
+   Eight reward variants failed for this one reason. _computeReward() now calls
+   _checkTouchdown() itself.
 
-   gym_pybullet_drones.BaseAviary.step() evaluates in this order:
-
-       obs        = self._computeObs()
-       reward     = self._computeReward()        <-- FIRST
-       terminated = self._computeTerminated()    <-- calls _checkTouchdown()
-
-   _checkTouchdown() sets self.touchdown_recorded = True, but it only ran
-   inside _computeTerminated(), which is called AFTER _computeReward().
-
-   So on the step where the drone reached the pad, _computeReward() still saw
-   touchdown_recorded == False, skipped the bonus block, and returned an
-   ordinary shaping reward. The episode then ended, so there was no later step
-   in which the bonus could be paid.
-
-   The landing bonus was NEVER awarded, at any value. Eight consecutive reward
-   variants failed for this single reason. Fix: _computeReward() now calls
-   _checkTouchdown() itself, before evaluating the bonus. The method is
-   idempotent, so calling it from both places is safe.
-
-2. PHASE MEMORISATION (fixed in v7, this version)
-
-   With fixed A and omega, and every episode starting at t = 0, the platform
-   is at a fully predictable position at every timestep. Nothing forces the
-   policy to use its relative-position observation — memorising a timed
-   routine ("at step 60, move here") scores just as well and is easier to
-   learn.
-
-   That is exactly what happened. A sweep over platform frequency produced
-   NON-MONOTONIC success:
-
-       omega   accel      success
-       0.200   0.050        0%      <- GENTLER than trained, still fails
-       0.500   0.125      100%      <- trained value
-       0.800   0.200        0%
-       1.200   0.300        0%
-       1.800   0.450      100%      <- near a harmonic of the trained rhythm
-       2.800   0.700        0%
-
-   A physical limit produces a clean threshold. Success that comes and goes
-   with frequency is a timing artefact, not a capability limit. The 100%
-   success reported earlier was measuring memorisation, not tracking.
-
-   Fix: platform motion parameters are RESAMPLED EVERY EPISODE. Amplitude,
-   frequency, and phase offset are all randomised, so no fixed schedule can
-   succeed and the only way to score is to actually use the observation.
-
-   Expect success rate to DROP relative to the fixed-motion version. That drop
-   is the honest number. Shin et al. (RA-L 2026) randomise platform motion
-   during training for precisely this reason.
+2. PHASE MEMORISATION (v7). With fixed amplitude and frequency, and every
+   episode starting at t=0, the platform's position was fully predictable from
+   the step counter. The policy memorised a timed routine instead of using its
+   observation, and scored 100% while having learned nothing transferable. A
+   frequency sweep exposed it: success was NON-MONOTONIC, failing at 0.2 rad/s,
+   succeeding at 0.5, failing at 0.8 and 1.2, succeeding again at 1.8. Motion
+   parameters are now resampled every episode.
 """
 
 import numpy as np
@@ -79,7 +69,7 @@ from gym_pybullet_drones.utils.enums import DroneModel, Physics, ActionType, Obs
 
 
 class LandingAviary(BaseRLAviary):
-    """Single agent RL problem: land on a moving platform."""
+    """Single agent RL problem: land on a moving platform, with modelled sensing."""
 
     def __init__(self,
                  drone_model: DroneModel = DroneModel.CF2X,
@@ -93,24 +83,30 @@ class LandingAviary(BaseRLAviary):
                  obs: ObservationType = ObservationType.KIN,
                  act: ActionType = ActionType.RPM,
                  # --- platform motion ---------------------------------
-                 # Ranges, resampled every episode. Set randomize_platform
-                 # to False and pass fixed values to evaluate one setting.
                  randomize_platform: bool = True,
                  amplitude_range=(0.2, 1.0),
                  omega_range=(0.2, 1.5),
-                 platform_amplitude: float = 0.5,   # used when randomize=False
-                 platform_omega: float = 0.5,       # used when randomize=False
+                 platform_amplitude: float = 0.5,
+                 platform_omega: float = 0.5,
                  platform_size: float = 0.20,
                  platform_height: float = 0.10,
                  start_height: float = 0.8,
                  ratchet_slack: float = 0.10,
+                 # --- sensing model -----------------------------------
+                 use_sensor_model: bool = True,
+                 uwb_noise_std: float = 0.15,      # metres, per axis
+                 uwb_rate_hz: float = 20.0,        # update rate
+                 uwb_outlier_prob: float = 0.02,   # NLOS spikes
+                 aruco_noise_std: float = 0.02,    # metres, per axis
+                 aruco_fov_height: float = 0.30,   # below this, marker leaves frame
+                 aruco_tilt_limit: float = 0.50,   # rad, marker lost past this
+                 aruco_dropout_prob: float = 0.10, # random frame drops
                  ):
 
         self.RANDOMIZE_PLATFORM = randomize_platform
         self.AMPLITUDE_RANGE = amplitude_range
         self.OMEGA_RANGE = omega_range
 
-        # Current episode's values. Overwritten each reset when randomising.
         self.PLAT_AMPLITUDE = platform_amplitude
         self.PLAT_OMEGA = platform_omega
         self.PLAT_PHASE = 0.0
@@ -120,14 +116,29 @@ class LandingAviary(BaseRLAviary):
         self.START_HEIGHT = start_height
         self.RATCHET_SLACK = ratchet_slack
 
+        # --- sensing parameters ---------------------------------------
+        self.USE_SENSOR_MODEL = use_sensor_model
+        self.UWB_NOISE_STD = uwb_noise_std
+        self.UWB_RATE_HZ = uwb_rate_hz
+        self.UWB_OUTLIER_PROB = uwb_outlier_prob
+        self.ARUCO_NOISE_STD = aruco_noise_std
+        self.ARUCO_FOV_HEIGHT = aruco_fov_height
+        self.ARUCO_TILT_LIMIT = aruco_tilt_limit
+        self.ARUCO_DROPOUT_PROB = aruco_dropout_prob
+
+        # Last measurement the drone actually received. Held between UWB
+        # updates and used when nothing is currently visible.
+        self.last_meas_pos = np.zeros(3)
+        self.last_meas_vel = np.zeros(3)
+        self.last_uwb_step = -1
+
+        # Diagnostics
+        self.steps_blind = 0
+        self.steps_total = 0
+
         self.EPISODE_LEN_SEC = 10
-
         self.PLATFORM_ID = None
-
-        # Height above the pad on the previous step, for the progress term.
         self.prev_height = None
-
-        # Lowest height above the pad reached so far, for the ratchet.
         self.min_height_seen = None
 
         # --- touchdown bookkeeping ------------------------------------
@@ -155,39 +166,31 @@ class LandingAviary(BaseRLAviary):
                          )
 
     # ------------------------------------------------------------------
-    # THE PLATFORM
+    # THE PLATFORM (ground truth — used for physics, reward, and metrics,
+    # but NOT given directly to the policy when the sensor model is on)
     # ------------------------------------------------------------------
 
     def _samplePlatformMotion(self):
         """Draw new motion parameters for this episode.
 
-        Randomising AMPLITUDE, FREQUENCY, and PHASE together means:
-
-          - amplitude   -> the platform travels a different distance
-          - frequency   -> it reverses at a different rate
-          - phase       -> it is somewhere different at t = 0, and moving in
-                           a different direction
-
         Phase matters most. Without it, every episode begins with the platform
-        at x = 0 moving in the +x direction, which is itself a memorisable cue.
+        at x = 0 moving in +x, which is itself a memorisable cue.
         """
         if not self.RANDOMIZE_PLATFORM:
             return
-
         rng = self.np_random if hasattr(self, 'np_random') else np.random
-
         self.PLAT_AMPLITUDE = float(rng.uniform(*self.AMPLITUDE_RANGE))
         self.PLAT_OMEGA = float(rng.uniform(*self.OMEGA_RANGE))
         self.PLAT_PHASE = float(rng.uniform(0.0, 2.0 * np.pi))
 
     def _getPlatformPos(self):
-        """Centre of the pad SURFACE right now."""
+        """TRUE centre of the pad surface. Ground truth."""
         t = self.step_counter / self.PYB_FREQ
         x = self.PLAT_AMPLITUDE * np.sin(self.PLAT_OMEGA * t + self.PLAT_PHASE)
         return np.array([x, 0.0, self.PLAT_HEIGHT])
 
     def _getPlatformVel(self):
-        """Platform velocity right now."""
+        """TRUE platform velocity. Ground truth."""
         t = self.step_counter / self.PYB_FREQ
         vx = (self.PLAT_AMPLITUDE * self.PLAT_OMEGA
               * np.cos(self.PLAT_OMEGA * t + self.PLAT_PHASE))
@@ -196,9 +199,8 @@ class LandingAviary(BaseRLAviary):
     def _updatePlatform(self):
         """Create the pad if needed, then teleport it along its trajectory.
 
-        Mass 0 makes it KINEMATIC: physics never pushes it, but it still has a
-        collision shape so the drone can rest on it. Created even without the
-        GUI, because the drone must be able to physically touch it.
+        Mass 0 makes it kinematic: physics never pushes it, but it has a
+        collision shape so the drone can rest on it.
         """
         pos = self._getPlatformPos()
 
@@ -225,12 +227,87 @@ class LandingAviary(BaseRLAviary):
                 physicsClientId=self.CLIENT
             )
 
-    def reset(self, seed=None, options=None):
-        """Reset the episode.
+    # ------------------------------------------------------------------
+    # THE SENSING MODEL
+    # ------------------------------------------------------------------
 
-        BaseAviary wipes the PyBullet simulation, so the pad id must be
-        cleared. New platform motion is sampled here.
+    def _senseRelativeState(self, true_rel_pos, true_rel_vel, drone_state):
+        """Turn ground truth into what the drone would actually measure.
+
+        Returns (measured_pos, measured_vel, uwb_valid, aruco_valid).
+
+        ARUCO — accurate but conditional
+            Available only when ALL of:
+              - the drone is high enough that the marker is still in frame
+              - the drone is not tilted too far
+              - the detector did not drop this frame
+
+            The height condition is the important one. A downward camera at
+            height h sees a footprint of about 2h, so a marker of side s leaves
+            the frame at roughly h = s. The drone goes blind for the last
+            ARUCO_FOV_HEIGHT metres of every descent.
+
+        UWB — always available, but coarse
+            Decimetre noise, ~20 Hz updates (so the same reading is held for
+            several control steps), and occasional NLOS outliers of 0.5-2 m.
+
+        FUSION — deliberately naive
+            When ArUco is available it is used, because it is far more
+            accurate. Otherwise UWB. When neither updated this step, the last
+            received measurement is held.
+
+            No Kalman filter. That is intentional: Shin et al. (RA-L 2026)
+            showed an EKF DIVERGES during marker dropout because it falls back
+            on a constant-velocity model, whereas a learned temporal estimator
+            degrades gracefully. Handing the policy raw measurements plus
+            validity flags leaves that estimation problem for the network,
+            which is exactly what the recurrent policy is meant to solve.
         """
+        rng = self.np_random if hasattr(self, 'np_random') else np.random
+
+        height_above = drone_state[2] - self._getPlatformPos()[2]
+        tilt = np.linalg.norm(drone_state[7:9])
+
+        # --- ArUco availability ---------------------------------------
+        aruco_in_frame = height_above > self.ARUCO_FOV_HEIGHT
+        aruco_level_enough = tilt < self.ARUCO_TILT_LIMIT
+        aruco_frame_ok = rng.random() > self.ARUCO_DROPOUT_PROB
+        aruco_valid = bool(aruco_in_frame and aruco_level_enough and aruco_frame_ok)
+
+        # --- UWB availability (rate-limited) --------------------------
+        steps_between_uwb = max(1, int(self.CTRL_FREQ / self.UWB_RATE_HZ))
+        uwb_valid = (self.step_counter - self.last_uwb_step) >= steps_between_uwb
+
+        # --- take a measurement ---------------------------------------
+        if aruco_valid:
+            noise = rng.normal(0, self.ARUCO_NOISE_STD, 3)
+            self.last_meas_pos = true_rel_pos + noise
+            self.last_meas_vel = true_rel_vel + rng.normal(0, self.ARUCO_NOISE_STD * 2, 3)
+            self.last_uwb_step = self.step_counter
+
+        elif uwb_valid:
+            noise = rng.normal(0, self.UWB_NOISE_STD, 3)
+            if rng.random() < self.UWB_OUTLIER_PROB:
+                # NLOS spike: a large, wrong reading
+                noise = noise + rng.normal(0, 1.0, 3)
+            self.last_meas_pos = true_rel_pos + noise
+            self.last_meas_vel = true_rel_vel + rng.normal(0, self.UWB_NOISE_STD * 3, 3)
+            self.last_uwb_step = self.step_counter
+
+        # else: no new information this step. Hold the last measurement.
+
+        if not aruco_valid:
+            self.steps_blind += 1
+        self.steps_total += 1
+
+        return (self.last_meas_pos.copy(), self.last_meas_vel.copy(),
+                uwb_valid, aruco_valid)
+
+    # ------------------------------------------------------------------
+    # RESET
+    # ------------------------------------------------------------------
+
+    def reset(self, seed=None, options=None):
         self.PLATFORM_ID = None
         self.prev_height = None
         self.min_height_seen = None
@@ -241,16 +318,22 @@ class LandingAviary(BaseRLAviary):
         self.touchdown_offset = None
         self.landed_successfully = False
 
+        self.last_meas_pos = np.zeros(3)
+        self.last_meas_vel = np.zeros(3)
+        self.last_uwb_step = -1
+        self.steps_blind = 0
+        self.steps_total = 0
+
         out = super().reset(seed=seed, options=options)
 
-        # Sample AFTER super().reset(), because that is where np_random is
-        # seeded. Then rebuild the observation so it reflects the new motion.
+        # Sample AFTER super().reset(), where np_random is seeded.
         self._samplePlatformMotion()
         obs = self._computeObs()
         return obs, out[1]
 
     # ------------------------------------------------------------------
-    # TOUCHDOWN DETECTION
+    # TOUCHDOWN DETECTION (uses ground truth — this is measurement, not
+    # something the drone is told)
     # ------------------------------------------------------------------
 
     def _checkTouchdown(self):
@@ -258,10 +341,6 @@ class LandingAviary(BaseRLAviary):
 
         IDEMPOTENT — safe to call more than once per step. Both
         _computeReward() and _computeTerminated() call it.
-
-        Touchdown is defined as a CONDITION on height rather than waiting for
-        the physics engine to report contact. Contact detection depends on
-        collision-mesh detail and is not reproducible; a height threshold is.
         """
         if self.touchdown_recorded:
             return True
@@ -293,10 +372,22 @@ class LandingAviary(BaseRLAviary):
     # ------------------------------------------------------------------
 
     def _observationSpace(self):
-        """Parent space plus 6: relative platform position and velocity."""
+        """Parent space plus 8 when the sensor model is on, 6 when off.
+
+        With the sensor model:
+            3  measured relative position
+            3  measured relative velocity
+            1  uwb_valid   (0 or 1)
+            1  aruco_valid (0 or 1)
+
+        The two flags matter. Without them the policy cannot distinguish
+        "the platform is right here" from "I cannot see the platform" — a
+        stale measurement looks identical to a fresh one.
+        """
         base = super()._observationSpace()
-        lo = np.full((base.shape[0], 6), -np.inf, dtype=np.float32)
-        hi = np.full((base.shape[0], 6), np.inf, dtype=np.float32)
+        n_extra = 8 if self.USE_SENSOR_MODEL else 6
+        lo = np.full((base.shape[0], n_extra), -np.inf, dtype=np.float32)
+        hi = np.full((base.shape[0], n_extra), np.inf, dtype=np.float32)
         return spaces.Box(
             low=np.hstack([base.low, lo]).astype(np.float32),
             high=np.hstack([base.high, hi]).astype(np.float32),
@@ -304,76 +395,56 @@ class LandingAviary(BaseRLAviary):
         )
 
     def _computeObs(self):
-        """Parent observation, plus platform position and velocity RELATIVE
-        to the drone.
-
-        Relative, because that is what real sensing gives you. UWB reports a
-        range to the platform; an ArUco marker reports a pose relative to the
-        camera. The drone never receives world coordinates.
-
-        With randomised motion these six numbers are the ONLY way to locate
-        the platform. That is the point: it forces the policy to be a feedback
-        controller rather than a timed routine.
-        """
+        """Parent observation, plus what the drone can sense of the platform."""
         self._updatePlatform()
 
         obs = super()._computeObs()
         state = self._getDroneStateVector(0)
 
-        rel_pos = self._getPlatformPos() - state[0:3]
-        rel_vel = self._getPlatformVel() - state[10:13]
+        true_rel_pos = self._getPlatformPos() - state[0:3]
+        true_rel_vel = self._getPlatformVel() - state[10:13]
 
-        extra = np.hstack([rel_pos, rel_vel]).reshape(1, 6)
+        if self.USE_SENSOR_MODEL:
+            meas_pos, meas_vel, uwb_valid, aruco_valid = self._senseRelativeState(
+                true_rel_pos, true_rel_vel, state)
+            extra = np.hstack([
+                meas_pos, meas_vel,
+                float(uwb_valid), float(aruco_valid)
+            ]).reshape(1, 8)
+        else:
+            extra = np.hstack([true_rel_pos, true_rel_vel]).reshape(1, 6)
+
         return np.hstack([obs, extra]).astype('float32')
 
     # ------------------------------------------------------------------
-    # REWARD
+    # REWARD (computed from GROUND TRUTH)
     # ------------------------------------------------------------------
+    #
+    # The reward uses true positions, not measured ones. That is correct: the
+    # reward defines the TASK, and the task is to actually land on the pad,
+    # not to think you have. Rewarding a measured landing would let the policy
+    # score points for being fooled by sensor noise.
+    #
+    # The policy never sees the reward's inputs — only its value.
 
     def _computeReward(self):
         """Approach, align, match velocity, descend, touch down softly.
 
-        PROGRESS — 30 * (previous height - current height), gated
-
-            A function of CHANGE, not of state. Positive when descending,
-            negative when climbing, exactly zero when hovering. State-based
-            rewards create places to park; progress rewards cannot be farmed
-            by standing still.
-
-            Gated on horizontal alignment: progress only pays while within
-            1.5 pad-widths. This is the commit-timing decision, and it is what
-            makes landing harder than tracking — the drone must get over the
-            pad FIRST, then come down.
+        PROGRESS — 30 * (previous height - current height), gated on alignment
+            A function of CHANGE, not of state. Zero when hovering, so it
+            cannot be farmed by standing still. Gated within 1.5 pad-widths:
+            the drone must get over the pad FIRST, then descend. That gate is
+            the commit-timing decision, and it is what makes landing harder
+            than tracking.
 
         ALIGNMENT — exp(-3 * horizontal distance)
-
-            Get over the pad. Horizontal only, because vertical distance is
-            what we WANT the drone to close.
-
-        VELOCITY MATCHING — 0.5 * exp(-2 * |lateral relative velocity|)
-
-            Move WITH the platform. Right place at the wrong speed means a
-            sideways hit and a tumble on contact.
-
+        VELOCITY MATCHING — 0.5 * exp(-2 * lateral relative speed)
         TILT PENALTY — -0.3 * tilt
-
-            A drone that touches down tilted catches a leg and flips.
-
-        TOUCHDOWN BONUS — 300 flat, plus up to 800 scaled by quality
-
-            The flat 300 pays for REACHING the pad at all. Without it a
-            mediocre landing scores less than continued hovering, so the policy
-            never experiences a good outcome and cannot learn that landing is
-            worthwhile.
-
-        Returns
-        -------
-        float
+        TOUCHDOWN BONUS — 300 flat, plus up to 800 scaled by landing quality
         """
         # CRITICAL: BaseAviary.step() calls _computeReward() BEFORE
-        # _computeTerminated(), and _checkTouchdown() lives in the latter.
-        # Without this line the bonus below never fires on the touchdown step,
-        # and the episode then ends, so the bonus is never paid at all.
+        # _computeTerminated(), where _checkTouchdown() otherwise lives.
+        # Without this line the bonus never fires on the touchdown step.
         self._checkTouchdown()
 
         state = self._getDroneStateVector(0)
@@ -415,30 +486,21 @@ class LandingAviary(BaseRLAviary):
     # ------------------------------------------------------------------
 
     def _computeTerminated(self):
-        """Episode ends on touchdown, successful or not."""
         return self._checkTouchdown()
 
     def _computeTruncated(self):
-        """Failure, or out of time."""
         state = self._getDroneStateVector(0)
 
-        # Arena scales with the largest amplitude the platform can be given,
-        # so the bound does not change between episodes.
         bound = 1.0 + self.AMPLITUDE_RANGE[1]
 
         if abs(state[0]) > bound or abs(state[1]) > 1.0 or state[2] > 2.0:
             return True
 
-        # tilted past ~23 degrees
         if abs(state[7]) > 0.4 or abs(state[8]) > 0.4:
             return True
 
-        # --- DESCENT RATCHET ------------------------------------------
-        #
-        # The drone may never be more than RATCHET_SLACK above the lowest
-        # point it has already reached. Hovering is still legal, but it earns
-        # zero progress reward and times out with a low score, while
-        # descending reaches the bonus.
+        # Descent ratchet: never more than RATCHET_SLACK above the lowest
+        # point already reached. Hovering earns zero progress and times out.
         h = state[2] - self._getPlatformPos()[2]
         if self.min_height_seen is None or h < self.min_height_seen:
             self.min_height_seen = h
@@ -451,12 +513,7 @@ class LandingAviary(BaseRLAviary):
         return False
 
     def _computeInfo(self):
-        """Per-step diagnostics, plus touchdown metrics once contact happens.
-
-        Platform parameters are included so evaluation can be broken down by
-        motion difficulty — with randomised motion, every episode is a
-        different test case.
-        """
+        """Per-step diagnostics, touchdown metrics, and sensing statistics."""
         state = self._getDroneStateVector(0)
         plat_pos = self._getPlatformPos()
 
@@ -469,6 +526,8 @@ class LandingAviary(BaseRLAviary):
             "plat_omega": self.PLAT_OMEGA,
             "plat_peak_speed": self.PLAT_AMPLITUDE * self.PLAT_OMEGA,
             "plat_peak_accel": self.PLAT_AMPLITUDE * self.PLAT_OMEGA ** 2,
+            "blind_fraction": (self.steps_blind / self.steps_total
+                               if self.steps_total > 0 else 0.0),
         }
 
         if self.touchdown_recorded:
