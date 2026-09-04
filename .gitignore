@@ -8,3 +8,5 @@ models/
 wandb/
 .vscode/
 results_landing/
+results_recurrent/
+*.log
