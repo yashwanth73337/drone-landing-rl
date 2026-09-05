@@ -2,64 +2,90 @@
 LandingAviary
 =============
 
-Land a quadrotor on a moving platform.
+Land a quadrotor on a moving platform, using a REAL DOWNWARD CAMERA and
+OpenCV ArUco detection.
 
 Built on gym-pybullet-drones (utiasDSL).
 
 
-WHAT THIS VERSION ADDS: A SENSING MODEL
----------------------------------------
-Every previous version handed the policy PRIVILEGED STATE — the exact relative
-position and velocity of the platform, read straight out of the simulator,
-noiseless and always available. A real drone cannot measure that.
+THREE SENSING MODES
+-------------------
+Set via `sensing` in the constructor. This is the ablation axis.
 
-This version models the lab's actual sensing stack:
+  'privileged'   Exact relative position and velocity from the simulator.
+                 Noiseless, always available. A real drone cannot measure
+                 this; it exists only to separate the control problem from
+                 the perception problem.
 
-  UWB (ultra-wideband radio ranging)
-      Works at any range and any attitude. But noisy (decimetre-level), slow
-      to update (~20 Hz), and occasionally throws an NLOS outlier.
+  'abstract'     Synthetic UWB + ArUco. Models the OUTPUT of a detection
+                 pipeline — noise, update rate, and a hand-set field-of-view
+                 dropout height — without rendering anything.
 
-  ArUco fiducial marker + downward camera
-      Centimetre accurate. But only works while the marker is inside the
-      camera's field of view.
+  'camera'       A real downward camera is rendered. An ArUco marker sits on
+                 the landing pad. Detection runs through cv2.aruco and
+                 relative pose is recovered with solvePnP. When the marker is
+                 not detected, the drone falls back to UWB.
 
-The critical detail is geometric. A downward camera at height h sees a ground
-footprint of roughly 2h. A marker of side s therefore leaves the frame at about
-h = s. For a 20-50 cm marker, the drone is BLIND FOR THE FINAL 20-60 CM OF
-EVERY LANDING — precisely when precision matters most.
+In camera mode nothing about the dropout is assumed. The marker leaves the
+frame because of actual projective geometry: a camera at height h sees a
+footprint of roughly 2h, so a marker of side s vanishes at about h = s. Tilt
+loses the marker because the camera genuinely points elsewhere. Both are
+emergent, not thresholds.
 
-The marker is also lost at high tilt, and detection drops frames during fast
-motion.
 
-Set `use_sensor_model=False` to recover the old privileged-state behaviour for
-comparison. That switch is the ablation.
+THE MARKER IS BUILT FROM GEOMETRY, NOT A TEXTURE
+------------------------------------------------
+Three attempts failed before this one, all for the same underlying reason:
+PyBullet repeats textures rather than mapping them once.
 
-Expect success to FALL relative to privileged state. The current policy is a
-plain MLP with no memory: it sees only the present instant, so when the marker
-vanishes it has nothing to fall back on. Recovering that loss with a recurrent
-policy is the contribution.
+  1. Texture on the pad box. GEOM_BOX has no useful UV coordinates, so the
+     marker was stretched across all six faces. The rendered image showed a
+     single blown-up black cell filling the frame. ArUco found one
+     quadrilateral it could not decode.
+
+  2. Texture on a thin GEOM_BOX plate sized to the marker. Same problem —
+     the plate is still a box.
+
+  3. Texture on plane.obj. plane.obj DOES have UVs, but they are set to
+     repeat, so the marker tiled 5x4 across the frame. Detection succeeded
+     sixteen times, all id 0, so there was no way to know which tile was the
+     pad centre. Shrinking the mesh only packed in more tiles (14x14, none
+     decodable) because the UV repeat scales with the mesh.
+
+Solution: build the marker out of small black boxes, one per marker cell. A
+4x4 ArUco marker occupies a 6x6 grid — the 4x4 payload plus a one-cell black
+border. Thirty-six boxes, no texture, no UV mapping, exact scale.
+
+The cells are collision-free decoration; they never touch the drone.
+
+
+VERIFY BEFORE TRAINING. Run verify_camera.py first. An unverified perception
+pipeline produces plausible-looking but wrong numbers, and a policy trained on
+those looks like an architecture failure rather than a bug.
 
 
 PRIOR BUGS FIXED IN THIS FILE
 -----------------------------
 
-1. ORDERING BUG (v6). gym_pybullet_drones.BaseAviary.step() calls
-   _computeReward() BEFORE _computeTerminated(), and _checkTouchdown() — which
-   sets touchdown_recorded — lived only in the latter. So on the touchdown step
-   the reward function saw touchdown_recorded == False, skipped the bonus, and
-   the episode then ended. The landing bonus was NEVER paid, at any value.
-   Eight reward variants failed for this one reason. _computeReward() now calls
-   _checkTouchdown() itself.
+1. ORDERING BUG. BaseAviary.step() calls _computeReward() BEFORE
+   _computeTerminated(), and _checkTouchdown() — which sets
+   touchdown_recorded — lived only in the latter. On the touchdown step the
+   reward function saw the flag as False, skipped the bonus, and the episode
+   then ended. The landing bonus was NEVER paid, at any value. Eight reward
+   variants failed for this one reason.
 
-2. PHASE MEMORISATION (v7). With fixed amplitude and frequency, and every
-   episode starting at t=0, the platform's position was fully predictable from
-   the step counter. The policy memorised a timed routine instead of using its
-   observation, and scored 100% while having learned nothing transferable. A
-   frequency sweep exposed it: success was NON-MONOTONIC, failing at 0.2 rad/s,
-   succeeding at 0.5, failing at 0.8 and 1.2, succeeding again at 1.8. Motion
-   parameters are now resampled every episode.
+2. PHASE MEMORISATION. With fixed amplitude and frequency, and every episode
+   starting at t=0, the platform's position was predictable from the step
+   counter alone. The policy memorised a timed routine and scored 100% while
+   having learned nothing transferable. A frequency sweep exposed it: success
+   was non-monotonic, failing at 0.2 rad/s, succeeding at 0.5, failing at 0.8
+   and 1.2, succeeding again at 1.8. Motion parameters are now resampled every
+   episode, phase included.
+
+3. MARKER RENDERING. See above.
 """
 
+import os
 import numpy as np
 import pybullet as p
 from gymnasium import spaces
@@ -67,9 +93,16 @@ from gymnasium import spaces
 from gym_pybullet_drones.envs.BaseRLAviary import BaseRLAviary
 from gym_pybullet_drones.utils.enums import DroneModel, Physics, ActionType, ObservationType
 
+try:
+    import cv2
+    _HAS_CV2 = hasattr(cv2, 'aruco')
+except ImportError:
+    cv2 = None
+    _HAS_CV2 = False
+
 
 class LandingAviary(BaseRLAviary):
-    """Single agent RL problem: land on a moving platform, with modelled sensing."""
+    """Land on a moving platform, with a real camera and ArUco detection."""
 
     def __init__(self,
                  drone_model: DroneModel = DroneModel.CF2X,
@@ -92,32 +125,86 @@ class LandingAviary(BaseRLAviary):
                  platform_height: float = 0.10,
                  start_height: float = 0.8,
                  ratchet_slack: float = 0.10,
-                 # --- sensing model -----------------------------------
-                 use_sensor_model: bool = True,
-                 uwb_noise_std: float = 0.15,      # metres, per axis
-                 uwb_rate_hz: float = 20.0,        # update rate
-                 uwb_outlier_prob: float = 0.02,   # NLOS spikes
-                 aruco_noise_std: float = 0.02,    # metres, per axis
-                 aruco_fov_height: float = 0.30,   # below this, marker leaves frame
-                 aruco_tilt_limit: float = 0.50,   # rad, marker lost past this
-                 aruco_dropout_prob: float = 0.10, # random frame drops
+                 # --- sensing -----------------------------------------
+                 sensing: str = 'camera',      # 'privileged' | 'abstract' | 'camera'
+                 # camera
+                 cam_width: int = 128,
+                 cam_height: int = 96,
+                 cam_fov_deg: float = 80.0,
+                 cam_every_n_steps: int = 2,   # render every N control steps
+                 marker_size: float = 0.30,    # side length, metres
+                 marker_id: int = 0,
+                 # UWB fallback (used in both 'abstract' and 'camera')
+                 uwb_noise_std: float = 0.15,
+                 uwb_rate_hz: float = 20.0,
+                 uwb_outlier_prob: float = 0.02,
+                 # abstract-mode ArUco surrogate
+                 aruco_noise_std: float = 0.02,
+                 aruco_fov_height: float = 0.30,
+                 aruco_tilt_limit: float = 0.50,
+                 aruco_dropout_prob: float = 0.10,
                  ):
+
+        if sensing not in ('privileged', 'abstract', 'camera'):
+            raise ValueError(f"sensing must be privileged/abstract/camera, got {sensing}")
+        if sensing == 'camera' and not _HAS_CV2:
+            raise ImportError(
+                "sensing='camera' needs cv2.aruco.\n"
+                "    pip install opencv-contrib-python"
+            )
+
+        self.SENSING = sensing
 
         self.RANDOMIZE_PLATFORM = randomize_platform
         self.AMPLITUDE_RANGE = amplitude_range
         self.OMEGA_RANGE = omega_range
-
         self.PLAT_AMPLITUDE = platform_amplitude
         self.PLAT_OMEGA = platform_omega
         self.PLAT_PHASE = 0.0
-
         self.PLAT_SIZE = platform_size
         self.PLAT_HEIGHT = platform_height
         self.START_HEIGHT = start_height
         self.RATCHET_SLACK = ratchet_slack
 
-        # --- sensing parameters ---------------------------------------
-        self.USE_SENSOR_MODEL = use_sensor_model
+        # --- camera ---------------------------------------------------
+        self.CAM_W = cam_width
+        self.CAM_H = cam_height
+        self.CAM_FOV = cam_fov_deg
+        self.CAM_EVERY = max(1, cam_every_n_steps)
+        self.MARKER_SIZE = marker_size
+        self.MARKER_ID = marker_id
+
+        # (body_id, dx, dy) for each black cell of the marker.
+        self.MARKER_CELL_IDS = []
+
+        # Pinhole intrinsics implied by the FOV and image size.
+        # PyBullet's computeProjectionMatrixFOV takes a VERTICAL fov.
+        f = (self.CAM_H / 2.0) / np.tan(np.radians(self.CAM_FOV) / 2.0)
+        self.K = np.array([[f, 0, self.CAM_W / 2.0],
+                           [0, f, self.CAM_H / 2.0],
+                           [0, 0, 1.0]], dtype=np.float64)
+        self.DIST = np.zeros(5)   # PyBullet renders a perfect pinhole
+
+        # Marker corners in the marker's own frame, in the order cv2.aruco
+        # returns them: top-left, top-right, bottom-right, bottom-left.
+        #
+        # NOTE: cv2.aruco reports the corners of the PAYLOAD, i.e. the 4x4
+        # region inside the black border. Our geometry spans 6x6 cells, so the
+        # payload is 4/6 of MARKER_SIZE. Getting this wrong scales the whole
+        # pose estimate by 1.5.
+        hm = self.MARKER_SIZE / 2.0
+        self.MARKER_OBJ_PTS = np.array([[-hm,  hm, 0],
+                                        [ hm,  hm, 0],
+                                        [ hm, -hm, 0],
+                                        [-hm, -hm, 0]], dtype=np.float64)
+
+        if _HAS_CV2:
+            self.ARUCO_DICT = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+            self.ARUCO_PARAMS = cv2.aruco.DetectorParameters()
+            self.ARUCO_DETECTOR = cv2.aruco.ArucoDetector(
+                self.ARUCO_DICT, self.ARUCO_PARAMS)
+
+        # --- UWB / abstract sensing -----------------------------------
         self.UWB_NOISE_STD = uwb_noise_std
         self.UWB_RATE_HZ = uwb_rate_hz
         self.UWB_OUTLIER_PROB = uwb_outlier_prob
@@ -126,15 +213,17 @@ class LandingAviary(BaseRLAviary):
         self.ARUCO_TILT_LIMIT = aruco_tilt_limit
         self.ARUCO_DROPOUT_PROB = aruco_dropout_prob
 
-        # Last measurement the drone actually received. Held between UWB
-        # updates and used when nothing is currently visible.
+        # Last measurement actually received. Held between updates.
         self.last_meas_pos = np.zeros(3)
         self.last_meas_vel = np.zeros(3)
+        self.last_meas_step = -1
         self.last_uwb_step = -1
 
         # Diagnostics
         self.steps_blind = 0
         self.steps_total = 0
+        self.detect_error_sum = 0.0
+        self.detect_count = 0
 
         self.EPISODE_LEN_SEC = 10
         self.PLATFORM_ID = None
@@ -166,15 +255,14 @@ class LandingAviary(BaseRLAviary):
                          )
 
     # ------------------------------------------------------------------
-    # THE PLATFORM (ground truth — used for physics, reward, and metrics,
-    # but NOT given directly to the policy when the sensor model is on)
+    # THE PLATFORM (ground truth — physics, reward, and metrics only)
     # ------------------------------------------------------------------
 
     def _samplePlatformMotion(self):
-        """Draw new motion parameters for this episode.
+        """New motion parameters for this episode.
 
-        Phase matters most. Without it, every episode begins with the platform
-        at x = 0 moving in +x, which is itself a memorisable cue.
+        Phase matters most. Without it every episode begins with the platform
+        at x = 0 moving in +x, itself a memorisable cue.
         """
         if not self.RANDOMIZE_PLATFORM:
             return
@@ -184,23 +272,71 @@ class LandingAviary(BaseRLAviary):
         self.PLAT_PHASE = float(rng.uniform(0.0, 2.0 * np.pi))
 
     def _getPlatformPos(self):
-        """TRUE centre of the pad surface. Ground truth."""
+        """TRUE centre of the pad surface."""
         t = self.step_counter / self.PYB_FREQ
         x = self.PLAT_AMPLITUDE * np.sin(self.PLAT_OMEGA * t + self.PLAT_PHASE)
         return np.array([x, 0.0, self.PLAT_HEIGHT])
 
     def _getPlatformVel(self):
-        """TRUE platform velocity. Ground truth."""
+        """TRUE platform velocity."""
         t = self.step_counter / self.PYB_FREQ
         vx = (self.PLAT_AMPLITUDE * self.PLAT_OMEGA
               * np.cos(self.PLAT_OMEGA * t + self.PLAT_PHASE))
         return np.array([vx, 0.0, 0.0])
 
-    def _updatePlatform(self):
-        """Create the pad if needed, then teleport it along its trajectory.
+    # ------------------------------------------------------------------
+    # THE MARKER, BUILT FROM GEOMETRY
+    # ------------------------------------------------------------------
 
-        Mass 0 makes it kinematic: physics never pushes it, but it has a
-        collision shape so the drone can rest on it.
+    def _buildMarkerGeometry(self, pos):
+        """Build the ArUco marker out of black boxes, one per cell.
+
+        PyBullet repeats textures rather than mapping them once — on a
+        GEOM_BOX the texture stretches across all six faces, and on plane.obj
+        the UVs are set to repeat, producing a tiled grid of markers.
+        Constructing the pattern from geometry avoids UV mapping entirely, so
+        the marker renders exactly once at exactly the right scale.
+
+        cv2.aruco.generateImageMarker with sidePixels=6 returns the 6x6 cell
+        grid directly: the 4x4 payload plus a one-cell black border.
+
+        The cells have no collision shape. They are decoration only and can
+        never affect the drone.
+        """
+        grid = cv2.aruco.generateImageMarker(self.ARUCO_DICT, self.MARKER_ID, 6)
+        is_black = (grid < 128)
+
+        cell = self.MARKER_SIZE / 6.0
+        half = cell / 2.0
+        first = -self.MARKER_SIZE / 2.0 + half
+        z = self.PLAT_HEIGHT + 0.002
+
+        black = p.createVisualShape(
+            p.GEOM_BOX, halfExtents=[half, half, 0.0005],
+            rgbaColor=[0, 0, 0, 1],
+            physicsClientId=self.CLIENT)
+
+        self.MARKER_CELL_IDS = []
+        for row in range(6):
+            for col in range(6):
+                if not is_black[row, col]:
+                    continue
+                dx = first + col * cell
+                dy = -(first + row * cell)     # image row 0 is +y in world
+                bid = p.createMultiBody(
+                    baseMass=0,
+                    baseCollisionShapeIndex=-1,
+                    baseVisualShapeIndex=black,
+                    basePosition=[pos[0] + dx, pos[1] + dy, z],
+                    physicsClientId=self.CLIENT)
+                self.MARKER_CELL_IDS.append((bid, dx, dy))
+
+    def _updatePlatform(self):
+        """Create the pad (and marker) if needed, then move them.
+
+        The pad is KINEMATIC: mass 0, so physics never pushes it, but it has a
+        collision shape so the drone can rest on it. It is white, to give the
+        black marker cells contrast.
         """
         pos = self._getPlatformPos()
 
@@ -210,105 +346,222 @@ class LandingAviary(BaseRLAviary):
                 p.GEOM_BOX, halfExtents=half, physicsClientId=self.CLIENT)
             visual = p.createVisualShape(
                 p.GEOM_BOX, halfExtents=half,
-                rgbaColor=[0.9, 0.2, 0.2, 1.0],
+                rgbaColor=[1, 1, 1, 1],
                 physicsClientId=self.CLIENT)
             self.PLATFORM_ID = p.createMultiBody(
                 baseMass=0,
                 baseCollisionShapeIndex=collision,
                 baseVisualShapeIndex=visual,
                 basePosition=[pos[0], pos[1], self.PLAT_HEIGHT / 2],
-                physicsClientId=self.CLIENT
-            )
+                physicsClientId=self.CLIENT)
+
+            if self.SENSING == 'camera':
+                self._buildMarkerGeometry(pos)
         else:
             p.resetBasePositionAndOrientation(
                 self.PLATFORM_ID,
                 [pos[0], pos[1], self.PLAT_HEIGHT / 2],
                 [0, 0, 0, 1],
-                physicsClientId=self.CLIENT
-            )
+                physicsClientId=self.CLIENT)
+
+            z = self.PLAT_HEIGHT + 0.002
+            for bid, dx, dy in self.MARKER_CELL_IDS:
+                p.resetBasePositionAndOrientation(
+                    bid,
+                    [pos[0] + dx, pos[1] + dy, z],
+                    [0, 0, 0, 1],
+                    physicsClientId=self.CLIENT)
 
     # ------------------------------------------------------------------
-    # THE SENSING MODEL
+    # CAMERA
     # ------------------------------------------------------------------
 
-    def _senseRelativeState(self, true_rel_pos, true_rel_vel, drone_state):
-        """Turn ground truth into what the drone would actually measure.
+    def _cameraFrame(self):
+        """Camera axes in WORLD coordinates, from the drone's current attitude.
 
-        Returns (measured_pos, measured_vel, uwb_valid, aruco_valid).
+        The camera is body-fixed and points along the drone's -z body axis.
+        When the drone tilts, the camera tilts with it — which is why marker
+        loss from tilt is emergent here rather than a threshold.
 
-        ARUCO — accurate but conditional
-            Available only when ALL of:
-              - the drone is high enough that the marker is still in frame
-              - the drone is not tilted too far
-              - the detector did not drop this frame
+        Returns (position, right, down, forward) in OpenCV convention:
+        +x right, +y down, +z forward.
+        """
+        state = self._getDroneStateVector(0)
+        pos = state[0:3]
+        quat = state[3:7]
+        R = np.array(p.getMatrixFromQuaternion(quat)).reshape(3, 3)
 
-            The height condition is the important one. A downward camera at
-            height h sees a footprint of about 2h, so a marker of side s leaves
-            the frame at roughly h = s. The drone goes blind for the last
-            ARUCO_FOV_HEIGHT metres of every descent.
+        forward = R @ np.array([0.0, 0.0, -1.0])   # straight down when level
+        body_x = R @ np.array([1.0, 0.0, 0.0])
 
-        UWB — always available, but coarse
-            Decimetre noise, ~20 Hz updates (so the same reading is held for
-            several control steps), and occasional NLOS outliers of 0.5-2 m.
+        right = np.cross(forward, body_x)
+        n = np.linalg.norm(right)
+        if n < 1e-8:
+            right = np.array([1.0, 0.0, 0.0])
+        else:
+            right = right / n
 
-        FUSION — deliberately naive
-            When ArUco is available it is used, because it is far more
-            accurate. Otherwise UWB. When neither updated this step, the last
-            received measurement is held.
+        down = np.cross(forward, right)
+        down = down / (np.linalg.norm(down) + 1e-12)
 
-            No Kalman filter. That is intentional: Shin et al. (RA-L 2026)
-            showed an EKF DIVERGES during marker dropout because it falls back
-            on a constant-velocity model, whereas a learned temporal estimator
-            degrades gracefully. Handing the policy raw measurements plus
-            validity flags leaves that estimation problem for the network,
-            which is exactly what the recurrent policy is meant to solve.
+        return pos, right, down, forward
+
+    def _renderCamera(self):
+        """Render the downward view. Returns a grayscale uint8 image."""
+        pos, right, down, forward = self._cameraFrame()
+
+        up = -down
+        target = pos + 0.5 * forward
+
+        view = p.computeViewMatrix(
+            cameraEyePosition=pos.tolist(),
+            cameraTargetPosition=target.tolist(),
+            cameraUpVector=up.tolist(),
+            physicsClientId=self.CLIENT)
+
+        proj = p.computeProjectionMatrixFOV(
+            fov=self.CAM_FOV,
+            aspect=self.CAM_W / self.CAM_H,
+            nearVal=0.02,
+            farVal=10.0,
+            physicsClientId=self.CLIENT)
+
+        _, _, rgb, _, _ = p.getCameraImage(
+            width=self.CAM_W,
+            height=self.CAM_H,
+            viewMatrix=view,
+            projectionMatrix=proj,
+            renderer=p.ER_TINY_RENDERER,
+            flags=p.ER_NO_SEGMENTATION_MASK,
+            physicsClientId=self.CLIENT)
+
+        rgb = np.reshape(rgb, (self.CAM_H, self.CAM_W, 4))[:, :, :3]
+        return cv2.cvtColor(rgb.astype(np.uint8), cv2.COLOR_RGB2GRAY)
+
+    def _detectMarker(self, image):
+        """Detect the marker and recover the platform position relative to
+        the drone, in WORLD axes.
+
+        Returns (rel_pos, True) on success, (None, False) otherwise.
+
+        solvePnP gives the marker's position in CAMERA coordinates. That is
+        rotated back into world axes using the camera frame, so the result is
+        directly comparable to the privileged-state measurement.
+        """
+        corners, ids, _ = self.ARUCO_DETECTOR.detectMarkers(image)
+
+        if ids is None or len(ids) == 0:
+            return None, False
+
+        idx = None
+        for i, mid in enumerate(ids.flatten()):
+            if mid == self.MARKER_ID:
+                idx = i
+                break
+        if idx is None:
+            return None, False
+
+        img_pts = corners[idx].reshape(4, 2).astype(np.float64)
+
+        ok, rvec, tvec = cv2.solvePnP(
+            self.MARKER_OBJ_PTS, img_pts, self.K, self.DIST,
+            flags=cv2.SOLVEPNP_IPPE_SQUARE)
+
+        if not ok:
+            return None, False
+
+        t_cam = tvec.reshape(3)
+
+        # Camera axes -> world. Columns are the camera's x, y, z in world.
+        _, right, down, forward = self._cameraFrame()
+        R_cam_to_world = np.column_stack([right, down, forward])
+
+        rel_pos = R_cam_to_world @ t_cam
+        return rel_pos, True
+
+    # ------------------------------------------------------------------
+    # SENSING
+    # ------------------------------------------------------------------
+
+    def _sense(self, true_rel_pos, true_rel_vel):
+        """Produce the measurement the drone actually receives.
+
+        Returns (meas_pos, meas_vel, uwb_valid, aruco_valid).
+
+        Velocity is differentiated from successive position measurements
+        rather than measured directly — neither a camera nor a UWB anchor
+        reports velocity. That differentiation amplifies noise, which is
+        realistic and is part of what makes this hard.
         """
         rng = self.np_random if hasattr(self, 'np_random') else np.random
+        state = self._getDroneStateVector(0)
 
-        height_above = drone_state[2] - self._getPlatformPos()[2]
-        tilt = np.linalg.norm(drone_state[7:9])
+        # ---- privileged ----------------------------------------------
+        if self.SENSING == 'privileged':
+            self.steps_total += 1
+            return true_rel_pos.copy(), true_rel_vel.copy(), True, True
 
-        # --- ArUco availability ---------------------------------------
-        aruco_in_frame = height_above > self.ARUCO_FOV_HEIGHT
-        aruco_level_enough = tilt < self.ARUCO_TILT_LIMIT
-        aruco_frame_ok = rng.random() > self.ARUCO_DROPOUT_PROB
-        aruco_valid = bool(aruco_in_frame and aruco_level_enough and aruco_frame_ok)
-
-        # --- UWB availability (rate-limited) --------------------------
+        # ---- UWB availability (both other modes) ---------------------
         steps_between_uwb = max(1, int(self.CTRL_FREQ / self.UWB_RATE_HZ))
         uwb_valid = (self.step_counter - self.last_uwb_step) >= steps_between_uwb
 
-        # --- take a measurement ---------------------------------------
-        if aruco_valid:
-            noise = rng.normal(0, self.ARUCO_NOISE_STD, 3)
-            self.last_meas_pos = true_rel_pos + noise
-            self.last_meas_vel = true_rel_vel + rng.normal(0, self.ARUCO_NOISE_STD * 2, 3)
-            self.last_uwb_step = self.step_counter
+        aruco_valid = False
+        new_pos = None
 
-        elif uwb_valid:
+        # ---- camera --------------------------------------------------
+        if self.SENSING == 'camera':
+            if self.step_counter % self.CAM_EVERY == 0:
+                img = self._renderCamera()
+                det_pos, aruco_valid = self._detectMarker(img)
+                if aruco_valid:
+                    new_pos = det_pos
+                    err = float(np.linalg.norm(det_pos - true_rel_pos))
+                    self.detect_error_sum += err
+                    self.detect_count += 1
+
+        # ---- abstract ArUco surrogate --------------------------------
+        else:
+            height_above = state[2] - self._getPlatformPos()[2]
+            tilt = np.linalg.norm(state[7:9])
+            aruco_valid = bool(height_above > self.ARUCO_FOV_HEIGHT
+                               and tilt < self.ARUCO_TILT_LIMIT
+                               and rng.random() > self.ARUCO_DROPOUT_PROB)
+            if aruco_valid:
+                new_pos = true_rel_pos + rng.normal(0, self.ARUCO_NOISE_STD, 3)
+
+        # ---- UWB fallback --------------------------------------------
+        if new_pos is None and uwb_valid:
             noise = rng.normal(0, self.UWB_NOISE_STD, 3)
             if rng.random() < self.UWB_OUTLIER_PROB:
-                # NLOS spike: a large, wrong reading
-                noise = noise + rng.normal(0, 1.0, 3)
-            self.last_meas_pos = true_rel_pos + noise
-            self.last_meas_vel = true_rel_vel + rng.normal(0, self.UWB_NOISE_STD * 3, 3)
-            self.last_uwb_step = self.step_counter
+                noise = noise + rng.normal(0, 1.0, 3)   # NLOS spike
+            new_pos = true_rel_pos + noise
 
-        # else: no new information this step. Hold the last measurement.
+        # ---- update held measurement ---------------------------------
+        if new_pos is not None:
+            dt_steps = self.step_counter - self.last_meas_step
+            if self.last_meas_step >= 0 and dt_steps > 0:
+                dt = dt_steps / self.PYB_FREQ
+                self.last_meas_vel = (new_pos - self.last_meas_pos) / dt
+            self.last_meas_pos = new_pos
+            self.last_meas_step = self.step_counter
+            self.last_uwb_step = self.step_counter
 
         if not aruco_valid:
             self.steps_blind += 1
         self.steps_total += 1
 
         return (self.last_meas_pos.copy(), self.last_meas_vel.copy(),
-                uwb_valid, aruco_valid)
+                bool(uwb_valid), bool(aruco_valid))
 
     # ------------------------------------------------------------------
     # RESET
     # ------------------------------------------------------------------
 
     def reset(self, seed=None, options=None):
+        """BaseAviary wipes the PyBullet simulation, so all body ids must be
+        cleared and the objects recreated."""
         self.PLATFORM_ID = None
+        self.MARKER_CELL_IDS = []
         self.prev_height = None
         self.min_height_seen = None
         self.touchdown_recorded = False
@@ -320,27 +573,31 @@ class LandingAviary(BaseRLAviary):
 
         self.last_meas_pos = np.zeros(3)
         self.last_meas_vel = np.zeros(3)
+        self.last_meas_step = -1
         self.last_uwb_step = -1
         self.steps_blind = 0
         self.steps_total = 0
+        self.detect_error_sum = 0.0
+        self.detect_count = 0
 
         out = super().reset(seed=seed, options=options)
 
-        # Sample AFTER super().reset(), where np_random is seeded.
+        # Sample after super().reset(), where np_random is seeded.
         self._samplePlatformMotion()
         obs = self._computeObs()
         return obs, out[1]
 
     # ------------------------------------------------------------------
-    # TOUCHDOWN DETECTION (uses ground truth — this is measurement, not
-    # something the drone is told)
+    # TOUCHDOWN
     # ------------------------------------------------------------------
 
     def _checkTouchdown(self):
-        """Has the drone reached the pad surface? If so, record how.
+        """Ground-truth contact detection. IDEMPOTENT — both _computeReward()
+        and _computeTerminated() call it.
 
-        IDEMPOTENT — safe to call more than once per step. Both
-        _computeReward() and _computeTerminated() call it.
+        Touchdown is a height condition rather than a physics-engine contact
+        query, because contact reporting depends on collision-mesh detail and
+        is not reproducible across runs.
         """
         if self.touchdown_recorded:
             return True
@@ -372,20 +629,15 @@ class LandingAviary(BaseRLAviary):
     # ------------------------------------------------------------------
 
     def _observationSpace(self):
-        """Parent space plus 8 when the sensor model is on, 6 when off.
+        """Parent space plus 6 (privileged) or 8 (abstract/camera).
 
-        With the sensor model:
-            3  measured relative position
-            3  measured relative velocity
-            1  uwb_valid   (0 or 1)
-            1  aruco_valid (0 or 1)
-
-        The two flags matter. Without them the policy cannot distinguish
-        "the platform is right here" from "I cannot see the platform" — a
-        stale measurement looks identical to a fresh one.
+        The two extra values are validity flags. Without them the policy
+        cannot distinguish "the platform is right here" from "I cannot see
+        the platform" — a stale held measurement looks identical to a fresh
+        one.
         """
         base = super()._observationSpace()
-        n_extra = 8 if self.USE_SENSOR_MODEL else 6
+        n_extra = 6 if self.SENSING == 'privileged' else 8
         lo = np.full((base.shape[0], n_extra), -np.inf, dtype=np.float32)
         hi = np.full((base.shape[0], n_extra), np.inf, dtype=np.float32)
         return spaces.Box(
@@ -395,7 +647,6 @@ class LandingAviary(BaseRLAviary):
         )
 
     def _computeObs(self):
-        """Parent observation, plus what the drone can sense of the platform."""
         self._updatePlatform()
 
         obs = super()._computeObs()
@@ -404,43 +655,36 @@ class LandingAviary(BaseRLAviary):
         true_rel_pos = self._getPlatformPos() - state[0:3]
         true_rel_vel = self._getPlatformVel() - state[10:13]
 
-        if self.USE_SENSOR_MODEL:
-            meas_pos, meas_vel, uwb_valid, aruco_valid = self._senseRelativeState(
-                true_rel_pos, true_rel_vel, state)
-            extra = np.hstack([
-                meas_pos, meas_vel,
-                float(uwb_valid), float(aruco_valid)
-            ]).reshape(1, 8)
+        meas_pos, meas_vel, uwb_valid, aruco_valid = self._sense(
+            true_rel_pos, true_rel_vel)
+
+        if self.SENSING == 'privileged':
+            extra = np.hstack([meas_pos, meas_vel]).reshape(1, 6)
         else:
-            extra = np.hstack([true_rel_pos, true_rel_vel]).reshape(1, 6)
+            extra = np.hstack([meas_pos, meas_vel,
+                               float(uwb_valid), float(aruco_valid)]).reshape(1, 8)
 
         return np.hstack([obs, extra]).astype('float32')
 
     # ------------------------------------------------------------------
-    # REWARD (computed from GROUND TRUTH)
+    # REWARD (from GROUND TRUTH)
     # ------------------------------------------------------------------
     #
-    # The reward uses true positions, not measured ones. That is correct: the
-    # reward defines the TASK, and the task is to actually land on the pad,
-    # not to think you have. Rewarding a measured landing would let the policy
-    # score points for being fooled by sensor noise.
-    #
-    # The policy never sees the reward's inputs — only its value.
+    # The reward defines the TASK, and the task is to actually land on the
+    # pad — not to believe you have. Rewarding a measured landing would let
+    # the policy score points for being fooled by sensor noise.
 
     def _computeReward(self):
-        """Approach, align, match velocity, descend, touch down softly.
+        """Alignment + velocity matching + gated descent progress + tilt
+        penalty + terminal bonus.
 
-        PROGRESS — 30 * (previous height - current height), gated on alignment
-            A function of CHANGE, not of state. Zero when hovering, so it
-            cannot be farmed by standing still. Gated within 1.5 pad-widths:
-            the drone must get over the pad FIRST, then descend. That gate is
-            the commit-timing decision, and it is what makes landing harder
-            than tracking.
+        PROGRESS is a function of CHANGE, not of state: positive descending,
+        negative climbing, exactly zero hovering. State-based rewards create
+        places to park; this one cannot be farmed by standing still.
 
-        ALIGNMENT — exp(-3 * horizontal distance)
-        VELOCITY MATCHING — 0.5 * exp(-2 * lateral relative speed)
-        TILT PENALTY — -0.3 * tilt
-        TOUCHDOWN BONUS — 300 flat, plus up to 800 scaled by landing quality
+        The GATE (progress pays only within 1.5 pad-widths) encodes the
+        commit-timing decision, which is what makes landing harder than
+        tracking: get over the pad first, then descend.
         """
         # CRITICAL: BaseAviary.step() calls _computeReward() BEFORE
         # _computeTerminated(), where _checkTouchdown() otherwise lives.
@@ -482,7 +726,7 @@ class LandingAviary(BaseRLAviary):
         return float(align + vel_match + progress + tilt_pen + bonus)
 
     # ------------------------------------------------------------------
-    # EPISODE END CONDITIONS
+    # EPISODE END
     # ------------------------------------------------------------------
 
     def _computeTerminated(self):
@@ -513,7 +757,6 @@ class LandingAviary(BaseRLAviary):
         return False
 
     def _computeInfo(self):
-        """Per-step diagnostics, touchdown metrics, and sensing statistics."""
         state = self._getDroneStateVector(0)
         plat_pos = self._getPlatformPos()
 
@@ -526,8 +769,11 @@ class LandingAviary(BaseRLAviary):
             "plat_omega": self.PLAT_OMEGA,
             "plat_peak_speed": self.PLAT_AMPLITUDE * self.PLAT_OMEGA,
             "plat_peak_accel": self.PLAT_AMPLITUDE * self.PLAT_OMEGA ** 2,
+            "sensing": self.SENSING,
             "blind_fraction": (self.steps_blind / self.steps_total
                                if self.steps_total > 0 else 0.0),
+            "detect_error_mean": (self.detect_error_sum / self.detect_count
+                                  if self.detect_count > 0 else float('nan')),
         }
 
         if self.touchdown_recorded:
