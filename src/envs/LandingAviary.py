@@ -476,7 +476,11 @@ class LandingAviary(BaseRLAviary):
         _, right, down, forward = self._cameraFrame()
         R_cam_to_world = np.column_stack([right, down, forward])
 
+        
+
         rel_pos = R_cam_to_world @ t_cam
+        if not np.all(np.isfinite(rel_pos)):
+            return None, False
         return rel_pos, True
 
     # ------------------------------------------------------------------
@@ -538,13 +542,15 @@ class LandingAviary(BaseRLAviary):
 
         # ---- update held measurement ---------------------------------
         if new_pos is not None:
+            new_pos = np.nan_to_num(new_pos, nan=0.0, posinf=0.0, neginf=0.0)
             dt_steps = self.step_counter - self.last_meas_step
             if self.last_meas_step >= 0 and dt_steps > 0:
                 dt = dt_steps / self.PYB_FREQ
-                self.last_meas_vel = (new_pos - self.last_meas_pos) / dt
+                vel = (new_pos - self.last_meas_pos) / dt
+                # Differentiating a noisy position blows up on short dt.
+                # Clip to a physically achievable speed.
+                self.last_meas_vel = np.clip(vel, -10.0, 10.0)
             self.last_meas_pos = new_pos
-            self.last_meas_step = self.step_counter
-            self.last_uwb_step = self.step_counter
 
         if not aruco_valid:
             self.steps_blind += 1
@@ -664,7 +670,9 @@ class LandingAviary(BaseRLAviary):
             extra = np.hstack([meas_pos, meas_vel,
                                float(uwb_valid), float(aruco_valid)]).reshape(1, 8)
 
-        return np.hstack([obs, extra]).astype('float32')
+
+        out = np.hstack([obs, extra]).astype('float32')
+        return np.nan_to_num(out, nan=0.0, posinf=1e3, neginf=-1e3)
 
     # ------------------------------------------------------------------
     # REWARD (from GROUND TRUTH)
