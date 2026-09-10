@@ -9,6 +9,19 @@ Usage:
 
 Every evaluation is appended to results_log.csv so results are never lost to a
 terminal scrollback buffer.
+
+
+CURRICULUM (Shin et al. RA-L 2026, Sec III-D-2 / Fig. 3 caption)
+-----------------------------------------------------------------
+The paper's curriculum runs 8 levels labelled 10 through 80 ("Level 10 -> ...
+-> Level 80"), stepped every 512 completed episodes; the scalar c = level/80
+scales platform motion magnitude (c=1 at level 80 reproduces the full task
+spec). CurriculumCallback below reproduces that schedule and pushes c into
+every parallel training env via LandingAviary.set_curriculum(). The eval_env
+used by EvalCallback (and the standalone `evaluate()` function below) is
+NEVER curriculum-scaled -- it always uses the default CURRICULUM_C=1.0, so
+evaluation always reflects the true, full-difficulty task regardless of
+where training currently sits in the curriculum.
 """
 
 import os
@@ -21,7 +34,7 @@ from collections import Counter
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.env_util import make_vec_env
-from stable_baselines3.common.callbacks import EvalCallback
+from stable_baselines3.common.callbacks import EvalCallback, BaseCallback, CallbackList
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from envs.LandingAviary import LandingAviary
@@ -30,13 +43,59 @@ from envs.LandingAviary import LandingAviary
 RESULTS_LOG = 'results_log.csv'
 
 
-def train(total_timesteps=500_000, output_dir='results_landing', continue_from=None):
+class CurriculumCallback(BaseCallback):
+    """Ramps the platform-motion curriculum scalar c from c_start to 1.0,
+    advancing one level every `episodes_per_level` completed episodes
+    (summed across all parallel training envs). Matches Shin et al. RA-L
+    2026 Sec III-D-2 / Fig. 3 caption: levels 10..80 in steps of 10 (8
+    levels total), c = level / 80, updated every 512 episodes.
+    """
+    def __init__(self, n_levels=8, episodes_per_level=512, c_start=0.125, verbose=0):
+        super().__init__(verbose)
+        self.n_levels = n_levels
+        self.episodes_per_level = episodes_per_level
+        self.c_start = c_start
+        self.episodes_seen = 0
+        self.current_level = 0   # 0-indexed; level 0 == paper's "Level 10"
+
+    def _on_training_start(self):
+        # Make sure every env starts at level 1 (c_start), not the default
+        # CURRICULUM_C=1.0 the environment constructs with.
+        c = self._level_to_c(0)
+        self.training_env.env_method('set_curriculum', c)
+        if self.verbose:
+            print(f"\n[curriculum] starting at level {10}/80, c={c:.4f}\n")
+
+    def _level_to_c(self, level_idx):
+        level_label = (level_idx + 1) * (80 // self.n_levels)   # 10, 20, ..., 80
+        return level_label / 80.0
+
+    def _on_step(self):
+        dones = self.locals.get('dones', None)
+        if dones is not None:
+            self.episodes_seen += int(np.sum(dones))
+
+        target_level = min(self.episodes_seen // self.episodes_per_level,
+                           self.n_levels - 1)
+        if target_level != self.current_level:
+            self.current_level = target_level
+            c = self._level_to_c(target_level)
+            self.training_env.env_method('set_curriculum', c)
+            if self.verbose:
+                level_label = (target_level + 1) * (80 // self.n_levels)
+                print(f"\n[curriculum] level {level_label}/80, c={c:.4f} "
+                      f"after {self.episodes_seen} episodes\n")
+        return True
+
+
+def train(total_timesteps=500_000, output_dir='results_landing', continue_from=None,
+         use_curriculum=True):
     os.makedirs(output_dir, exist_ok=True)
     run_dir = os.path.join(output_dir, time.strftime("run_%Y%m%d_%H%M%S"))
     os.makedirs(run_dir, exist_ok=True)
 
     train_env = make_vec_env(LandingAviary, n_envs=4, seed=0)
-    eval_env = LandingAviary()
+    eval_env = LandingAviary()   # always full difficulty (CURRICULUM_C=1.0)
 
     if continue_from:
         print(f"\nContinuing training from: {continue_from}\n")
@@ -53,8 +112,13 @@ def train(total_timesteps=500_000, output_dir='results_landing', continue_from=N
                                  deterministic=True,
                                  render=False)
 
+    callbacks = [eval_callback]
+    if use_curriculum:
+        callbacks.append(CurriculumCallback(verbose=1))
+
     print(f"\nTraining for {total_timesteps} steps. Output: {run_dir}\n")
-    model.learn(total_timesteps=total_timesteps, callback=eval_callback)
+    print(f"Curriculum: {'ON (Shin et al. RA-L 2026 schedule)' if use_curriculum else 'OFF (full difficulty from step 0)'}\n")
+    model.learn(total_timesteps=total_timesteps, callback=CallbackList(callbacks))
     model.save(os.path.join(run_dir, 'final_model'))
     print(f"\nDone. Saved to {run_dir}\n")
     return run_dir
@@ -83,6 +147,9 @@ def evaluate(model_path, n_episodes=100, note=""):
 
     Success rate is what the literature reports. The touchdown columns are what
     it does not, and are the contribution of this work.
+
+    Uses a fresh, non-curriculum-scaled LandingAviary (CURRICULUM_C defaults
+    to 1.0) -- evaluation always reflects the full-difficulty task.
     """
     env = LandingAviary()
     model = PPO.load(model_path)
@@ -98,6 +165,7 @@ def evaluate(model_path, n_episodes=100, note=""):
     reason_counts = Counter()
     aborted_episodes = 0
     below_platform_horiz = []
+    l_est_list = []
 
     for ep in range(n_episodes):
         obs, info = env.reset(seed=ep)
@@ -106,6 +174,8 @@ def evaluate(model_path, n_episodes=100, note=""):
             obs, reward, terminated, truncated, info = env.step(action)
             if terminated or truncated:
                 break
+
+        l_est_list.append(info.get("L_est", float('nan')))
 
         if info.get("touchdown"):
             touchdowns += 1
@@ -207,6 +277,16 @@ def evaluate(model_path, n_episodes=100, note=""):
         print(f"    below_platform horiz_dist: mean {np.mean(below_platform_horiz):.3f} m, "
               f"range {np.min(below_platform_horiz):.3f}-{np.max(below_platform_horiz):.3f} m "
               f"(pad half-size {env.PLAT_SIZE:.3f} m)")
+
+    if l_est_list and not all(np.isnan(l_est_list)):
+        print("-" * 58)
+        print("  Active-perception signal (final-step L_est, ground truth vs. sensed)")
+        print(f"    mean {np.nanmean(l_est_list):.5f}, "
+              f"range {np.nanmin(l_est_list):.5f}-{np.nanmax(l_est_list):.5f}")
+        row["l_est_mean"] = round(float(np.nanmean(l_est_list)), 6)
+    else:
+        row["l_est_mean"] = ""
+
     print("=" * 58)
     _append_to_log(row)
     print()
@@ -255,6 +335,8 @@ if __name__ == '__main__':
     parser.add_argument('--steps', type=int, default=500_000)
     parser.add_argument('--continue-from', type=str, default=None,
                         help='path to an existing best_model.zip to continue training from')
+    parser.add_argument('--no-curriculum', action='store_true',
+                        help='disable the Shin et al. curriculum, train at full difficulty from step 0')
     parser.add_argument('--model', type=str, default=None)
     parser.add_argument('--note', type=str, default="",
                         help='label for this run in results_log.csv')
@@ -265,4 +347,5 @@ if __name__ == '__main__':
     elif args.eval:
         evaluate(args.model or _latest_model(), args.episodes, args.note)
     else:
-        train(total_timesteps=args.steps, continue_from=args.continue_from)
+        train(total_timesteps=args.steps, continue_from=args.continue_from,
+             use_curriculum=not args.no_curriculum)

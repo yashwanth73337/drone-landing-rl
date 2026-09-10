@@ -50,12 +50,7 @@ THE NEW CONDITION has three parts, all required:
 
 This makes "success" a claim about the WHOLE 6-second episode around
 touchdown -- 3 seconds of approach and 3 seconds of staying put -- rather
-than a claim about one instant. Success rate under this condition is
-expected to be substantially lower than under the old one; that drop is the
-point. It should recover metrics that a single-instant check could not see:
-a landing that arrives after a wild final-second dive, or one that touches
-down cleanly but immediately bounces off, will now correctly be scored as a
-failure.
+than a claim about one instant.
 
 
 THREE SENSING MODES
@@ -74,6 +69,60 @@ Set via `sensing`. This is the ablation axis.
 A camera at height h sees a footprint of 2h*tan(fov/2), so a marker of side s
 leaves the frame at h = s/(2*tan(fov/2)) = 0.18 m for s = 0.30 m and
 fov = 80 deg. Measured cutoff: 0.195 m to 0.123 m. Derived, then verified.
+
+
+PAPER-INSPIRED ADDITIONS (Shin et al., "Vision-Based Autonomous Drone Landing
+on Moving Platforms With Uncertain Motion via Deep Reinforcement Learning,"
+IEEE RA-L 2026)
+------------------------------------------------------------------------------
+Two mechanisms from the paper are adapted here, scoped to what is realistic
+without the paper's learned LSTM estimator and asymmetric critic:
+
+1. ACTIVE-PERCEPTION REWARD (paper Sec III-C). Paper formula:
+
+       r_active_t = -alpha * clip(beta * (L_est_{t+1} - tau), 0, 1)
+
+   where L_est_t is the mean squared error between the true relative state
+   and the ESTIMATED relative state, evaluated over the 6-dim vector
+   [dx, dy, dz, dvx, dvy, dvz]. In the paper, the estimate comes from a
+   learned LSTM trained jointly with the policy on an auxiliary regression
+   loss. This codebase has no such estimator -- L_est here is computed
+   directly as ground-truth vs. the classical ArUco/UWB sensor's currently
+   held estimate (self.last_meas_pos / self.last_meas_vel from _sense()).
+   This is a SCOPED SIMPLIFICATION, not a reproduction of the paper's
+   estimator. Gains (alpha=0.1, beta=1.0, tau=0.01) are taken directly from
+   the paper.
+
+   Reward-timing note: gym_pybullet_drones' BaseAviary.step() calls
+   _computeObs() BEFORE _computeReward(). _sense() (called from
+   _computeObs()) sets self.L_est using the state AFTER this step's action
+   has been applied and physics has advanced -- i.e. by the time
+   _computeReward() reads self.L_est, it already reflects the paper's
+   L_est_{t+1} relative to the action just taken. No extra step-delay
+   bookkeeping is required for this to line up correctly.
+
+   The paper explicitly reports that a simpler binary "is the target in the
+   camera FOV" reward degrades performance once platform motion is
+   aggressive, because visibility-chasing corrections fight stable descent
+   and produce oscillatory camera-steering. That binary form is deliberately
+   NOT used here for that reason.
+
+2. CURRICULUM ON PLATFORM MOTION (paper Sec III-D-2, Fig. 3 caption). The
+   paper curriculum runs 8 levels, labelled 10 through 80, stepped every 512
+   completed episodes; c = level / 80 scales platform motion magnitude, with
+   c=1 (level 80) reproducing the full task specification. Implemented here
+   via CURRICULUM_C, set externally by a training callback through
+   set_curriculum(c) (see CurriculumCallback in train_landing.py). Defaults
+   to 1.0 so eval / --gui / standalone construction is unaffected.
+
+NOT implemented today (explicitly out of scope, for honesty about what this
+file does and does not reproduce from the paper): the keypoint-based visual
+encoder (hexagonal marker + learned descriptors replacing single-ArUco
+solvePnP), the learned LSTM relative-state estimator with its auxiliary MSE
+loss, the asymmetric actor-critic (privileged critic), and full domain
+randomization of control gains / disturbances / visual appearance (paper
+Table II). These require custom SB3 policy/critic architecture and are a
+larger, separate effort.
 
 
 PRIOR BUGS FIXED IN THIS FILE
@@ -97,6 +146,20 @@ PRIOR BUGS FIXED IN THIS FILE
 
 5. TOUCHDOWN HEIGHT. See above. 0.04 m -> 0.0125 m, from the drone's own
    collision geometry in cf2x.urdf.
+
+6. DOUBLE-CALL BUG. _checkTouchdown() was being called once from
+   _computeReward() and again from _computeTerminated() -- both hit the
+   same (unchanged) physics state per real step, but each call appended to
+   height_history / lateral_speed_history, silently halving the real-time
+   duration of the 3-second approach window to 1.5 s. Fixed with a
+   per-step cache (_checkTouchdown now wraps _checkTouchdownImpl and only
+   invokes it once per self.step_counter).
+
+7. RATCHET-VS-ABORT INTERACTION. The descent ratchet in _computeTruncated()
+   was applying to the intentional climb-away after an aborted landing
+   attempt (RATCHET_SLACK=0.10 m < MIN_CLEARANCE_AFTER_ABORT=0.15 m),
+   truncating the episode mid-recovery before it could ever clear and
+   retry. Fixed by exempting the ratchet check while awaiting_clearance.
 """
 
 import os
@@ -157,6 +220,10 @@ class LandingAviary(BaseRLAviary):
                  # --- descent rate ------------------------------------
                  descent_speed_cap: float = 0.35,
                  descent_penalty: float = 4.0,
+                 # --- active perception (Shin et al. RA-L 2026, Sec III-C) --
+                 active_perception_alpha: float = 0.1,
+                 active_perception_beta: float = 1.0,
+                 active_perception_tau: float = 0.01,
                  # --- sensing -----------------------------------------
                  sensing: str = 'camera',
                  cam_width: int = 128,
@@ -223,6 +290,23 @@ class LandingAviary(BaseRLAviary):
         self.truncation_horiz_dist = None
         self._touchdown_check_step = -1
         self._touchdown_check_result = False
+
+        # --- active perception (Shin et al. RA-L 2026, Sec III-C) --------
+        # L_est is the per-step ground-truth-vs-sensed-state mean squared
+        # error. The paper computes this against a LEARNED LSTM estimator's
+        # prediction; here it is ground-truth vs. the classical ArUco/UWB
+        # sensor's currently-held estimate -- a scoped simplification, not
+        # a reproduction of their estimator. See module docstring.
+        self.ACTIVE_PERCEPTION_ALPHA = active_perception_alpha
+        self.ACTIVE_PERCEPTION_BETA = active_perception_beta
+        self.ACTIVE_PERCEPTION_TAU = active_perception_tau
+        self.L_est = 0.0
+
+        # --- curriculum on platform motion (Sec III-D-2, Fig. 3) ---------
+        # c in [0, 1] scales platform motion magnitude; c=1 is the full task
+        # spec. Set externally by CurriculumCallback via set_curriculum().
+        # Defaults to 1.0 so eval/--gui/standalone use is unaffected.
+        self.CURRICULUM_C = 1.0
 
         # --- descent rate ---------------------------------------------
         self.DESCENT_SPEED_CAP = descent_speed_cap
@@ -308,6 +392,17 @@ class LandingAviary(BaseRLAviary):
                          )
 
     # ------------------------------------------------------------------
+    # CURRICULUM (Sec III-D-2)
+    # ------------------------------------------------------------------
+
+    def set_curriculum(self, c: float):
+        """External hook (called by CurriculumCallback during training) to
+        set the curriculum scalar c in [0, 1]. c=1 is the full task
+        specification; lower values shrink platform motion for easier early
+        training. See Shin et al. RA-L 2026, Sec III-D-2 / Fig. 3."""
+        self.CURRICULUM_C = float(np.clip(c, 0.0, 1.0))
+
+    # ------------------------------------------------------------------
     # THE PLATFORM
     # ------------------------------------------------------------------
 
@@ -315,8 +410,11 @@ class LandingAviary(BaseRLAviary):
         if not self.RANDOMIZE_PLATFORM:
             return
         rng = self.np_random if hasattr(self, 'np_random') else np.random
-        self.PLAT_AMPLITUDE = float(rng.uniform(*self.AMPLITUDE_RANGE))
-        self.PLAT_OMEGA = float(rng.uniform(*self.OMEGA_RANGE))
+        # Curriculum: sample from the full configured range, then scale
+        # toward zero motion by CURRICULUM_C. c=1 reproduces the original
+        # (pre-curriculum) sampling exactly.
+        self.PLAT_AMPLITUDE = float(rng.uniform(*self.AMPLITUDE_RANGE)) * self.CURRICULUM_C
+        self.PLAT_OMEGA = float(rng.uniform(*self.OMEGA_RANGE)) * self.CURRICULUM_C
         self.PLAT_PHASE = float(rng.uniform(0.0, 2.0 * np.pi))
 
     def _getPlatformPos(self):
@@ -483,6 +581,7 @@ class LandingAviary(BaseRLAviary):
 
         if self.SENSING == 'privileged':
             self.steps_total += 1
+            self.L_est = 0.0   # estimate == ground truth exactly, by construction
             return true_rel_pos.copy(), true_rel_vel.copy(), True, True
 
         steps_between_uwb = max(1, int(self.CTRL_FREQ / self.UWB_RATE_HZ))
@@ -530,6 +629,18 @@ class LandingAviary(BaseRLAviary):
             self.steps_blind += 1
         self.steps_total += 1
 
+        # --- active-perception signal (Shin et al. RA-L 2026, Sec III-C) --
+        # L_est_t = mean squared error over the 6-dim relative state
+        # [dx,dy,dz,dvx,dvy,dvz], ground truth vs. currently-held sensed
+        # estimate. Computed every step, including blind steps (where
+        # last_meas_pos/vel are stale and error naturally grows until a
+        # fresh measurement arrives) -- this is what gives the reward its
+        # incentive to avoid actions that lead to going blind.
+        err = np.concatenate([
+            true_rel_pos - self.last_meas_pos,
+            true_rel_vel - self.last_meas_vel])
+        self.L_est = float(np.mean(err ** 2))
+
         return (self.last_meas_pos.copy(), self.last_meas_vel.copy(),
                 bool(uwb_valid), bool(aruco_valid))
 
@@ -553,6 +664,10 @@ class LandingAviary(BaseRLAviary):
         self.truncation_horiz_dist = None
         self._touchdown_check_step = -1
         self._touchdown_check_result = False
+        self.L_est = 0.0
+        # NOTE: CURRICULUM_C is deliberately NOT reset here -- it must
+        # persist across episodes within a training run; only
+        # set_curriculum() (called by the training callback) changes it.
 
         self.touchdown_recorded = False
         self.episode_resolved = False
@@ -680,7 +795,6 @@ class LandingAviary(BaseRLAviary):
                 self.awaiting_clearance = False   # cleared -- a new attempt may now begin
             return False   # not yet cleared; contact cannot be re-triggered
 
-
         if height_above_pad > self.CONTACT_HEIGHT:
             return False
 
@@ -700,7 +814,7 @@ class LandingAviary(BaseRLAviary):
             self.height_history.clear()
             self.lateral_speed_history.clear()
             self.min_height_seen = None   # unlock the ratchet for the climb-away
-            self.awaiting_clearance = True   # <-- new line
+            self.awaiting_clearance = True
             return False
 
         return False   # approach was good -- entering the settle window
@@ -746,15 +860,16 @@ class LandingAviary(BaseRLAviary):
 
     def _computeReward(self):
         """Alignment + velocity matching + capped descent progress + tilt
-        penalty + steadiness + terminal bonus.
+        penalty + active-perception term + terminal bonus.
 
-        The terminal bonus now only fires once the FULL landing condition
+        The terminal bonus only fires once the FULL landing condition
         resolves successfully (approach + contact + settle), not on contact
-        alone. The bonus is therefore paid later in the episode than
-        before -- after the settle window -- so the reward must continue
-        rewarding good behaviour (alignment, velocity matching, low tilt)
-        THROUGHOUT the settle window too, or the policy has no signal
-        telling it to hold position rather than drift once contact is made.
+        alone. The bonus is therefore paid later in the episode than a
+        single-instant check would -- after the settle window -- so the
+        reward must continue rewarding good behaviour (alignment, velocity
+        matching, low tilt) THROUGHOUT the settle window too, or the policy
+        has no signal telling it to hold position rather than drift once
+        contact is made.
         """
         # CRITICAL: BaseAviary.step() calls _computeReward() BEFORE
         # _computeTerminated(). _checkTouchdown() must be invoked here so
@@ -792,7 +907,6 @@ class LandingAviary(BaseRLAviary):
         dt = 1.0 / self.CTRL_FREQ   # real time, in seconds, that one step covers
         progress = 0.0
         descent_pen = 0.0
-        steadiness = 0.0
 
         if not self.touchdown_recorded:
             # Everything in this block only applies BEFORE contact. During
@@ -821,27 +935,22 @@ class LandingAviary(BaseRLAviary):
             # was closed since then.
             self.prev_height = height_above
 
-            # --- NEW: STEADINESS REWARD -----------------------------------
-            # Rewards LOW sideways speed relative to the platform, given
-            # EVERY STEP during the approach -- not just checked once at the
-            # moment of contact. This is the same quantity
-            # _approachWasControlled() checks at the end, but given here as
-            # small continuous feedback throughout the 3-second window, so
-            # the policy has a reason to stay steady the whole way down,
-            # not just scramble into alignment at the last instant.
-            #
-            # Weighted at 0.2 -- deliberately smaller than align (up to 1.0)
-            # and vel_match (up to 0.5), so it nudges behaviour without
-            # overpowering the terms that do the main work of getting the
-            # drone to the platform in the first place.
-            
-
         # How tilted the drone currently is (roll + pitch combined)
         tilt = float(np.linalg.norm(state[7:9]))
 
         # Penalty for being tilted -- a tilted drone at touchdown is more
         # likely to catch a leg and flip.
         tilt_pen = -0.3 * tilt
+
+        # Active-perception term (Shin et al. RA-L 2026, Sec III-C): penalizes
+        # actions whose consequence is worse sensed-state accuracy, using
+        # self.L_est computed this step in _sense() (already reflects the
+        # action just taken -- see module docstring "Reward-timing note").
+        # Not applied under privileged sensing, where L_est is always 0 by
+        # construction and the term would be a no-op anyway.
+        r_active = -self.ACTIVE_PERCEPTION_ALPHA * float(np.clip(
+            self.ACTIVE_PERCEPTION_BETA * (self.L_est - self.ACTIVE_PERCEPTION_TAU),
+            0.0, 1.0))
 
         # The big one-off reward, paid ONLY once the entire landing condition
         # (controlled approach + correct contact height + survived settle
@@ -855,7 +964,7 @@ class LandingAviary(BaseRLAviary):
 
         # Everything added together is the reward for this one step.
         return float(align + vel_match + progress + descent_pen
-                     + tilt_pen + bonus)
+                     + tilt_pen + r_active + bonus)
 
     # ------------------------------------------------------------------
     # EPISODE END
@@ -884,6 +993,9 @@ class LandingAviary(BaseRLAviary):
                 np.linalg.norm(state[0:2] - self._getPlatformPos()[0:2]))
             return True
 
+        # Descent ratchet only applies BEFORE contact, and NOT while
+        # deliberately climbing away after an aborted attempt (see bug 7
+        # in the module docstring).
         if not self.touchdown_recorded and not self.awaiting_clearance:
             h = state[2] - self._getPlatformPos()[2]
             if self.min_height_seen is None or h < self.min_height_seen:
@@ -921,6 +1033,8 @@ class LandingAviary(BaseRLAviary):
             "failed_attempts": self.failed_attempts,
             "truncation_reason": self.truncation_reason,
             "truncation_horiz_dist": self.truncation_horiz_dist,
+            "L_est": self.L_est,
+            "curriculum_c": self.CURRICULUM_C,
         }
 
         if self.touchdown_recorded:
