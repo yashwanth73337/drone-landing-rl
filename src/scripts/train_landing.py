@@ -17,6 +17,7 @@ import csv
 import time
 import argparse
 import numpy as np
+from collections import Counter
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.env_util import make_vec_env
@@ -29,7 +30,7 @@ from envs.LandingAviary import LandingAviary
 RESULTS_LOG = 'results_log.csv'
 
 
-def train(total_timesteps=500_000, output_dir='results_landing'):
+def train(total_timesteps=500_000, output_dir='results_landing', continue_from=None):
     os.makedirs(output_dir, exist_ok=True)
     run_dir = os.path.join(output_dir, time.strftime("run_%Y%m%d_%H%M%S"))
     os.makedirs(run_dir, exist_ok=True)
@@ -37,8 +38,13 @@ def train(total_timesteps=500_000, output_dir='results_landing'):
     train_env = make_vec_env(LandingAviary, n_envs=4, seed=0)
     eval_env = LandingAviary()
 
-    model = PPO('MlpPolicy', train_env, verbose=1,
-                tensorboard_log=os.path.join(run_dir, 'tb'))
+    if continue_from:
+        print(f"\nContinuing training from: {continue_from}\n")
+        model = PPO.load(continue_from, env=train_env,
+                         tensorboard_log=os.path.join(run_dir, 'tb'))
+    else:
+        model = PPO('MlpPolicy', train_env, verbose=1,
+                    tensorboard_log=os.path.join(run_dir, 'tb'))
 
     eval_callback = EvalCallback(eval_env,
                                  best_model_save_path=run_dir,
@@ -89,6 +95,10 @@ def evaluate(model_path, n_episodes=100, note=""):
     # attributed to specific motion regimes rather than treated as noise.
     fail_speed, fail_accel = [], []
 
+    reason_counts = Counter()
+    aborted_episodes = 0
+    below_platform_horiz = []
+
     for ep in range(n_episodes):
         obs, info = env.reset(seed=ep)
         while True:
@@ -109,6 +119,12 @@ def evaluate(model_path, n_episodes=100, note=""):
         else:
             fail_speed.append(info.get("plat_peak_speed", float('nan')))
             fail_accel.append(info.get("plat_peak_accel", float('nan')))
+            reason = info.get("truncation_reason") or "terminated_no_reason"
+            reason_counts[reason] += 1
+            if reason == "below_platform" and info.get("truncation_horiz_dist") is not None:
+                below_platform_horiz.append(info["truncation_horiz_dist"])
+            if info.get("failed_attempts", 0) > 0:
+                aborted_episodes += 1
 
     env.close()
 
@@ -181,6 +197,16 @@ def evaluate(model_path, n_episodes=100, note=""):
         row["fail_speed_mean"] = ""
         row["fail_accel_mean"] = ""
 
+    print("-" * 58)
+    print("  Why failed episodes ended")
+    for reason, count in reason_counts.most_common():
+        print(f"    {reason:20s}: {count}")
+    print(f"    episodes with >=1 aborted attempt: {aborted_episodes}")
+
+    if below_platform_horiz:
+        print(f"    below_platform horiz_dist: mean {np.mean(below_platform_horiz):.3f} m, "
+              f"range {np.min(below_platform_horiz):.3f}-{np.max(below_platform_horiz):.3f} m "
+              f"(pad half-size {env.PLAT_SIZE:.3f} m)")
     print("=" * 58)
     _append_to_log(row)
     print()
@@ -227,6 +253,8 @@ if __name__ == '__main__':
     parser.add_argument('--eval', action='store_true', help='run the metrics table')
     parser.add_argument('--episodes', type=int, default=100)
     parser.add_argument('--steps', type=int, default=500_000)
+    parser.add_argument('--continue-from', type=str, default=None,
+                        help='path to an existing best_model.zip to continue training from')
     parser.add_argument('--model', type=str, default=None)
     parser.add_argument('--note', type=str, default="",
                         help='label for this run in results_log.csv')
@@ -237,4 +265,4 @@ if __name__ == '__main__':
     elif args.eval:
         evaluate(args.model or _latest_model(), args.episodes, args.note)
     else:
-        train(total_timesteps=args.steps)
+        train(total_timesteps=args.steps, continue_from=args.continue_from)

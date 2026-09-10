@@ -18,5 +18,10 @@ for i in range(300):
     if term or trunc:
         print(f"\nENDED step {i}: terminated={term} truncated={trunc}")
         print(info)
+        print()
+        print("  approach controlled? :", env._approachWasControlled())
+        print("  settle ok?           :", env.settle_ok)
+        print("  offset < pad size?   :", env.touchdown_offset < env.PLAT_SIZE,
+              f"({env.touchdown_offset:.3f} vs {env.PLAT_SIZE})")
         break
 env.close()
