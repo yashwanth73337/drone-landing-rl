@@ -4,6 +4,7 @@ __pycache__/
 results/
 models/
 *.zip
+!src/scripts/results_lander/*_final.zip
 *.pth
 wandb/
 .vscode/
