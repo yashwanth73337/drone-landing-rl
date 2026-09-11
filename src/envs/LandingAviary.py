@@ -221,7 +221,7 @@ class LandingAviary(BaseRLAviary):
                  descent_speed_cap: float = 0.35,
                  descent_penalty: float = 4.0,
                  # --- active perception (Shin et al. RA-L 2026, Sec III-C) --
-                 active_perception_alpha: float = 0.1,
+                 active_perception_alpha: float = 0.02,
                  active_perception_beta: float = 1.0,
                  active_perception_tau: float = 0.01,
                  # --- sensing -----------------------------------------
@@ -629,20 +629,28 @@ class LandingAviary(BaseRLAviary):
             self.steps_blind += 1
         self.steps_total += 1
 
+        # --- dead-reckoned held estimate ---------------------------------
+        # Between fresh fixes, extrapolate from the last real fix using the
+        # last known velocity, instead of freezing position outright. A
+        # frozen estimate makes L_est spike sharply the instant the marker
+        # leaves the camera's FOV near touchdown -- an EXPECTED consequence
+        # of camera geometry (see module docstring), not a mistake -- which
+        # was found to make the active-perception term punish the final
+        # approach itself. This is a closer (still simplified) stand-in for
+        # what the paper's learned LSTM estimator would predict while
+        # briefly blind.
+        dt_since_fix = ((self.step_counter - self.last_meas_step) / self.PYB_FREQ
+                        if self.last_meas_step >= 0 else 0.0)
+        held_pos = self.last_meas_pos + self.last_meas_vel * dt_since_fix
+
         # --- active-perception signal (Shin et al. RA-L 2026, Sec III-C) --
-        # L_est_t = mean squared error over the 6-dim relative state
-        # [dx,dy,dz,dvx,dvy,dvz], ground truth vs. currently-held sensed
-        # estimate. Computed every step, including blind steps (where
-        # last_meas_pos/vel are stale and error naturally grows until a
-        # fresh measurement arrives) -- this is what gives the reward its
-        # incentive to avoid actions that lead to going blind.
         err = np.concatenate([
-            true_rel_pos - self.last_meas_pos,
+            true_rel_pos - held_pos,
             true_rel_vel - self.last_meas_vel])
         self.L_est = float(np.mean(err ** 2))
 
-        return (self.last_meas_pos.copy(), self.last_meas_vel.copy(),
-                bool(uwb_valid), bool(aruco_valid))
+        return (held_pos.astype('float32'),
+                self.last_meas_vel.copy(), bool(uwb_valid), bool(aruco_valid))
 
     # ------------------------------------------------------------------
     # RESET

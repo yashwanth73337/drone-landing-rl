@@ -1,0 +1,27 @@
+timestamp,model,note,n_episodes,success_rate,dist_mean_cm,dist_std_cm
+2026-09-11 12:04:08,results_lander/run_20260911_113459/best_success_model.zip,"single-run radius curriculum, rebalanced reward",100,100.0,2.058,0.537
+2026-09-11 12:07:23,results_lander/run_20260911_113459/best_success_model.zip,wide 11-30cm check,100,100.0,2.034,0.473
+2026-09-11 12:13:17,results_lander/run_20260911_113459/final_model.zip,wide check: results_lander/run_20260911_113459/final_model.zip,100,100.0,2.826,0.624
+2026-09-11 12:13:26,results_lander/run_20260911_113459/best_success_model.zip,wide check: results_lander/run_20260911_113459/best_success_model.zip,100,100.0,2.034,0.473
+2026-09-11 12:50:46,results_lander/run_20260911_121753/best_success_model.zip,v2 run,100,67.0,7.716,1.546
+2026-09-11 12:52:35,results_lander/run_20260911_121753/best_success_model.zip,wide 11-30cm,100,57.0,6.81,2.076
+2026-09-11 14:21:59,results_lander/run_20260911_113459/best_success_model.zip,wide 11-30cm: results_lander/run_20260911_113459/best_success_model.zip,100,100.0,2.034,0.473
+2026-09-11 14:22:19,results_lander/run_20260911_121753/best_success_model.zip,wide 11-30cm: results_lander/run_20260911_121753/best_success_model.zip,100,57.0,6.81,2.076
+2026-09-11 14:22:27,results_lander/run_20260911_125803/best_success_model.zip,wide 11-30cm: results_lander/run_20260911_125803/best_success_model.zip,100,100.0,2.179,0.681
+2026-09-11 14:22:36,results_lander/run_20260911_132530/best_success_model.zip,wide 11-30cm: results_lander/run_20260911_132530/best_success_model.zip,100,100.0,2.211,0.77
+2026-09-11 14:22:44,results_lander/run_20260911_135249/best_success_model.zip,wide 11-30cm: results_lander/run_20260911_135249/best_success_model.zip,100,100.0,2.608,0.912
+2026-09-11 15:44:31,results_lander/run_20260911_144750/best_success_model.zip,"moving platform 0.25 m/s, 11-30cm",100,100.0,4.106,2.626
+2026-09-11 17:45:45,results_lander/run_20260911_113459/best_success_model.zip,moving 0.25: results_lander/run_20260911_113459/best_success_model.zip,100,71.0,5.688,2.793
+2026-09-11 17:46:06,results_lander/run_20260911_121753/best_success_model.zip,moving 0.25: results_lander/run_20260911_121753/best_success_model.zip,100,5.0,8.01,1.363
+2026-09-11 17:46:24,results_lander/run_20260911_125803/best_success_model.zip,moving 0.25: results_lander/run_20260911_125803/best_success_model.zip,100,71.0,6.937,2.422
+2026-09-11 17:46:45,results_lander/run_20260911_132530/best_success_model.zip,moving 0.25: results_lander/run_20260911_132530/best_success_model.zip,100,55.0,7.638,2.615
+2026-09-11 17:47:05,results_lander/run_20260911_135249/best_success_model.zip,moving 0.25: results_lander/run_20260911_135249/best_success_model.zip,100,52.0,6.062,2.672
+2026-09-11 17:47:16,results_lander/run_20260911_144750/best_success_model.zip,moving 0.25: results_lander/run_20260911_144750/best_success_model.zip,100,100.0,4.106,2.626
+2026-09-11 17:47:42,results_lander/run_20260911_154749/best_success_model.zip,moving 0.25: results_lander/run_20260911_154749/best_success_model.zip,100,17.0,5.502,2.165
+2026-09-11 17:48:07,results_lander/run_20260911_163950/best_success_model.zip,moving 0.25: results_lander/run_20260911_163950/best_success_model.zip,100,21.0,7.962,2.45
+2026-09-11 17:54:57,results_lander/run_20260911_144750/final_model.zip,moving 0.25 FINAL seed1,100,96.0,4.56,2.476
+2026-09-11 17:55:06,results_lander/run_20260911_154749/final_model.zip,moving 0.25 FINAL seed2,100,100.0,4.054,2.21
+2026-09-11 17:55:16,results_lander/run_20260911_163950/final_model.zip,moving 0.25 FINAL seed3,100,100.0,5.836,1.7
+2026-09-11 18:01:38,results_lander/run_20260911_125803/final_model.zip,stationary FINAL seed1,100,100.0,2.731,1.056
+2026-09-11 18:01:46,results_lander/run_20260911_132530/final_model.zip,stationary FINAL seed2,100,100.0,2.962,0.94
+2026-09-11 18:01:54,results_lander/run_20260911_135249/final_model.zip,stationary FINAL seed3,100,100.0,4.476,1.181
