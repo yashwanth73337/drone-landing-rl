@@ -25,3 +25,10 @@ timestamp,model,note,n_episodes,success_rate,dist_mean_cm,dist_std_cm
 2026-09-11 18:01:38,results_lander/run_20260911_125803/final_model.zip,stationary FINAL seed1,100,100.0,2.731,1.056
 2026-09-11 18:01:46,results_lander/run_20260911_132530/final_model.zip,stationary FINAL seed2,100,100.0,2.962,0.94
 2026-09-11 18:01:54,results_lander/run_20260911_135249/final_model.zip,stationary FINAL seed3,100,100.0,4.476,1.181
+2026-09-11 21:35:32,results_lander/stationary_seed1_final.zip,laptop post-pull check,20,100.0,2.671,0.848
+2026-09-11 21:41:19,results_lander/stationary_seed1_final.zip,laptop post-pull stationary seed1,100,100.0,2.731,1.056
+2026-09-11 21:41:33,results_lander/stationary_seed2_final.zip,laptop post-pull stationary seed2,100,100.0,2.962,0.94
+2026-09-11 21:41:48,results_lander/stationary_seed3_final.zip,laptop post-pull stationary seed3,100,100.0,4.476,1.181
+2026-09-11 21:42:05,results_lander/moving_025_seed1_final.zip,laptop post-pull moving seed1,100,96.0,4.56,2.476
+2026-09-11 21:42:21,results_lander/moving_025_seed2_final.zip,laptop post-pull moving seed2,100,100.0,4.054,2.21
+2026-09-11 21:42:37,results_lander/moving_025_seed3_final.zip,laptop post-pull moving seed3,100,100.0,5.836,1.7
