@@ -847,7 +847,15 @@ def play(model_path):
     env = LanderAIAviary(gui=True, **ENV_KWARGS)
     model = TD3.load(model_path)
 
-    obs, info = env.reset(seed=np.random.randint(0, 100000))
+    # NOTE: TD3.load() restores the checkpoint's training seed via SB3's
+    # set_random_seed(), which reseeds numpy's GLOBAL RNG as a side effect.
+    # np.random.randint() called after .load() is therefore NOT random --
+    # it returns the same value every time for a given checkpoint (verified:
+    # moving_025_seed2_final.zip always reseeds to produce 89256). Using
+    # time.time() instead is immune to this, since it's not derived from
+    # numpy's RNG state at all.
+    episode_seed = int(time.time() * 1000) % 100000
+    obs, info = env.reset(seed=episode_seed)
     for _ in range(int(env.EPISODE_LEN_SEC * env.CTRL_FREQ)):
         action, _ = model.predict(obs, deterministic=True)
         obs, reward, terminated, truncated, info = env.step(action)
