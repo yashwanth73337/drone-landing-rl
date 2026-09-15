@@ -11,3 +11,5 @@ wandb/
 results_landing/
 results_recurrent/
 *.log
+*.pkl
+*.pre_*

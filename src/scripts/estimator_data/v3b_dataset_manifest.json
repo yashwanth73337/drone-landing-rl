@@ -1,0 +1,52 @@
+{
+  "episodes": 538,
+  "total_steps": 63622,
+  "episodes_per_level": {
+    "1": 17,
+    "2": 16,
+    "3": 24,
+    "4": 50,
+    "5": 24,
+    "6": 16,
+    "7": 32,
+    "8": 75,
+    "9": 96,
+    "10": 72,
+    "11": 48,
+    "12": 68
+  },
+  "steps_per_level": {
+    "1": 1643,
+    "2": 1340,
+    "3": 2785,
+    "4": 6375,
+    "5": 2387,
+    "6": 1347,
+    "7": 2692,
+    "8": 10065,
+    "9": 12052,
+    "10": 9428,
+    "11": 4884,
+    "12": 8624
+  },
+  "episodes_per_source": {
+    "privileged_seed1": 104,
+    "privileged_seed2": 104,
+    "privileged_seed3": 104,
+    "scripted": 104,
+    "random": 10,
+    "v3a_block1": 56,
+    "v3a_block3": 56
+  },
+  "steps_per_source": {
+    "privileged_seed1": 9427,
+    "privileged_seed2": 7748,
+    "privileged_seed3": 7877,
+    "scripted": 12801,
+    "random": 3000,
+    "v3a_block1": 11325,
+    "v3a_block3": 11444
+  },
+  "dt": 0.03333333333333333,
+  "note": "Estimator trains on privileged/scripted trajectories but deploys under a vision policy. Distribution shift is expected; see the closed-loop check before any RL run."
+}

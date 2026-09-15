@@ -1,0 +1,28 @@
+[
+  {
+    "test": "fixed-action-sequence",
+    "passed": true,
+    "episodes": 20,
+    "steps": 6000,
+    "max_delta_pos": 0.0,
+    "max_delta_vel": 0.0,
+    "max_delta_plat": 0.0,
+    "max_delta_reward": 0.0,
+    "max_delta_obs": 0.0,
+    "termination_mismatches": 0,
+    "success_mismatches": 0
+  },
+  {
+    "test": "closed-loop-scripted",
+    "passed": true,
+    "episodes": 20,
+    "steps": 3190,
+    "max_delta_pos": 0.0,
+    "max_delta_vel": 0.0,
+    "max_delta_plat": 0.0,
+    "max_delta_reward": 0.0,
+    "max_delta_obs": 0.0,
+    "termination_mismatches": 0,
+    "success_mismatches": 0
+  }
+]

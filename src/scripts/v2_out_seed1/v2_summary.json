@@ -1,0 +1,62 @@
+{
+  "privileged": {
+    "episodes": 50,
+    "success_rate": 96.0,
+    "near_miss_rate": 4.0,
+    "precision_mean_cm": 4.415,
+    "precision_std_cm": 2.276,
+    "blind_fraction_mean": 47.17,
+    "blind_fraction_std": 13.78,
+    "longest_blind_run_mean": 42.4,
+    "longest_blind_run_max": 263,
+    "steps_before_first_detection_mean": 0.0,
+    "steps_before_first_detection_max": 0,
+    "never_detected_episodes": 0,
+    "pos_err_mean_m": 0.01297,
+    "vel_err_mean_ms": 0.19876,
+    "failure_reasons": {
+      "below_platform": 1,
+      "timeout": 1
+    }
+  },
+  "hold": {
+    "episodes": 50,
+    "success_rate": 14.0,
+    "near_miss_rate": 80.0,
+    "precision_mean_cm": 7.659,
+    "precision_std_cm": 2.352,
+    "blind_fraction_mean": 64.38,
+    "blind_fraction_std": 16.22,
+    "longest_blind_run_mean": 124.32,
+    "longest_blind_run_max": 272,
+    "steps_before_first_detection_mean": 0.0,
+    "steps_before_first_detection_max": 0,
+    "never_detected_episodes": 0,
+    "pos_err_mean_m": 0.01279,
+    "vel_err_mean_ms": 0.18428,
+    "failure_reasons": {
+      "timeout": 18,
+      "below_platform": 25
+    }
+  },
+  "predict": {
+    "episodes": 50,
+    "success_rate": 60.0,
+    "near_miss_rate": 26.0,
+    "precision_mean_cm": 6.073,
+    "precision_std_cm": 2.154,
+    "blind_fraction_mean": 55.08,
+    "blind_fraction_std": 19.65,
+    "longest_blind_run_mean": 95.64,
+    "longest_blind_run_max": 266,
+    "steps_before_first_detection_mean": 0.0,
+    "steps_before_first_detection_max": 0,
+    "never_detected_episodes": 0,
+    "pos_err_mean_m": 0.0129,
+    "vel_err_mean_ms": 0.183,
+    "failure_reasons": {
+      "timeout": 13,
+      "below_platform": 7
+    }
+  }
+}

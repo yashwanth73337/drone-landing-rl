@@ -1,0 +1,31 @@
+{
+  "episodes": 152,
+  "total_steps": 28896,
+  "kept": {
+    "L10/v3a_block1": 22,
+    "L10/v3a_block3": 14,
+    "L10/scripted_slow": 4,
+    "L11/v3a_block1": 25,
+    "L11/v3a_block3": 22,
+    "L11/scripted_slow": 6,
+    "L12/v3a_block1": 28,
+    "L12/v3a_block3": 22,
+    "L12/scripted_slow": 9
+  },
+  "rejected": {
+    "L10/v3a_block1": 8,
+    "L10/v3a_block3": 16,
+    "L10/scripted_slow": 26,
+    "L11/v3a_block1": 5,
+    "L11/v3a_block3": 8,
+    "L11/scripted_slow": 24,
+    "L12/v3a_block1": 2,
+    "L12/v3a_block3": 8,
+    "L12/scripted_slow": 21
+  },
+  "min_blind": 60,
+  "min_motion": 0.12,
+  "hard_stretch_len_mean": 155.4934210526316,
+  "hard_stretch_motion_mean": 0.193585348976972,
+  "note": "Targeted supplement for the long-dropout-at-speed gap found by the 2x2 cross-check. MERGE with the base dataset; do not train on this alone."
+}
