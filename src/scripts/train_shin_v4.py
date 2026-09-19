@@ -463,6 +463,13 @@ def evaluate_policy_recurrent(model, env_kwargs, n_episodes, seed_base,
                     action = dist.get_actions(
                         deterministic=True)[0].cpu().numpy()
 
+                # SB3 clips actions to the action space during rollout
+                # collection. Evaluation must clip identically or the policy
+                # is measured outside the regime it was trained in: the
+                # deterministic mean reaches |a| = 2.07 against bounds of +/-1.
+                action = np.clip(action, env.action_space.low,
+                                 env.action_space.high)
+
                 ep_start = th.zeros(1, dtype=th.float32, device=device)
 
                 # obs['target'] is the ground-truth s_rel for the frame the

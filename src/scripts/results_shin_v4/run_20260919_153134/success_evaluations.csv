@@ -1,0 +1,2 @@
+timestep,level,spawn_radius_min,spawn_radius_max,platform_speed_range,successes,episodes,success_rate,mean_success_distance_cm,mean_return,near_miss,timeout,below_platform,tilt_bound,position_bound,terminated_no_reason,blind_fraction,v4_pos_err_m,v4_vel_err_ms,cv_pos_err_m,cv_vel_err_ms
+5000,1,0.11,0.14,0.0,0,20,0.0,,-7.395446,0,20,0,0,0,0,0.1435,0.2138,0.06084,0.01463,0.24875
