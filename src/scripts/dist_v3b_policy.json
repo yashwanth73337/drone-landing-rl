@@ -3,6 +3,11 @@
   "obs_source": "lstm",
   "episodes": 50,
   "successes": 41,
+  "excursion_cells": {
+    "61-120|0.3": null,
+    ">120|0.3": true,
+    ">120|1.0": null
+  },
   "bins": {
     "visible": {
       "cv_pos": {

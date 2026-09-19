@@ -1,0 +1,2 @@
+timestep,level,platform_speed_range,success_rate,blind_fraction,longest_blind_run,steps_before_first_detection,pos_err_m,vel_err_ms
+25000,1,0.0,0.0,0.7286,202.3,0.0,0.01401,0.20505

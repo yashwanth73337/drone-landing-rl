@@ -32,3 +32,4 @@ timestamp,model,note,n_episodes,success_rate,dist_mean_cm,dist_std_cm
 2026-09-11 21:42:05,results_lander/moving_025_seed1_final.zip,laptop post-pull moving seed1,100,96.0,4.56,2.476
 2026-09-11 21:42:21,results_lander/moving_025_seed2_final.zip,laptop post-pull moving seed2,100,100.0,4.054,2.21
 2026-09-11 21:42:37,results_lander/moving_025_seed3_final.zip,laptop post-pull moving seed3,100,100.0,5.836,1.7
+2026-09-16 15:08:58,results_lander/moving_025_seed2_final.zip,live demo,100,100.0,4.054,2.21

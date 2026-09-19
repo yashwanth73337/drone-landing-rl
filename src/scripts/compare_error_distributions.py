@@ -196,37 +196,86 @@ def main():
         print(f'  {"frac > 1.0 m":<16}  CV {cp["frac_gt_1.0"]:.3f}'
               f'   LSTM {lp["frac_gt_1.0"]:.3f}')
 
-    print()
+        print()
     print('=' * 96)
+    print('  VERDICT -- suppression of crash-scale excursions, per blind-age bin')
+    print('=' * 96)
+    print()
+    print('  below_platform is caused by a SINGLE large position error during')
+    print('  descent, not by average error. The measurement is therefore the')
+    print('  fraction of frames exceeding a crash-relevant threshold.')
+    print()
+    print('  Reported per bin and never pooled: section 4.2 records a pooled')
+    print('  check passing while the estimator lost in four of eight bins.')
+    print()
+
+    DANGER = [0.3, 1.0]
+    cells = {}
+
+    print(f'  {"bin":<12}{"thresh":>8}{"CV":>9}{"LSTM":>9}{"abs drop":>11}'
+          f'   verdict')
+    print('  ' + '-' * 64)
+    for name, _, _ in AGE_BINS:
+        if name in ('visible', 'ALL blind') or name not in out:
+            continue
+        for t in DANGER:
+            cvf = out[name]['cv_pos'][f'frac_gt_{t}']
+            lsf = out[name]['lstm_pos'][f'frac_gt_{t}']
+            drop = cvf - lsf
+            if cvf < 0.05:
+                v = 'n/a  (CV already <5%)'
+            elif lsf <= 0.5 * cvf:
+                v = 'SUPPRESSED'
+                cells[(name, t)] = True
+            elif lsf >= cvf:
+                v = 'NOT suppressed'
+                cells[(name, t)] = False
+            else:
+                v = 'partial'
+                cells[(name, t)] = None
+            print(f'  {name:<12}{t:>8.1f}{cvf:>9.3f}{lsf:>9.3f}{drop:>11.3f}'
+                  f'   {v}')
+
+    won = sum(1 for v in cells.values() if v is True)
+    lost = sum(1 for v in cells.values() if v is False)
+    part = sum(1 for v in cells.values() if v is None)
+
+    print()
+    if not cells:
+        print('  NO TESTABLE CELLS. CV never exceeds the crash thresholds here,')
+        print('  so the mechanism cannot be tested on these frames.')
+    elif lost == 0 and won > 0:
+        print(f'  SUPPORTED.  LSTM suppresses crash-scale excursions in {won} of')
+        print(f'  {len(cells)} testable cells and loses in none ({part} partial).')
+        print('  The section 5.4 mechanism is carried by the tail of the error')
+        print('  distribution, not its centre.')
+    elif won > lost:
+        print(f'  PARTIALLY SUPPORTED.  wins {won}, loses {lost}, partial {part}.')
+        print('  Report per bin. Do not state the mechanism unconditionally.')
+    else:
+        print(f'  NOT SUPPORTED.  wins {won}, loses {lost}, partial {part}.')
+        print('  Error behaviour does not explain the below_platform result and')
+        print('  the report should record the mechanism as unexplained.')
+
     ab = out.get('ALL blind')
     if ab:
+        print()
+        print('  Context only (pooled across blind ages -- NOT a verdict):')
         mr = ab['lstm_pos']['mean'] / max(ab['cv_pos']['mean'], 1e-9)
         tr = ab['lstm_pos']['p99'] / max(ab['cv_pos']['p99'], 1e-9)
-        print(f'  Over all blind frames:  mean ratio {mr:.2f}   '
-              f'p99 ratio {tr:.2f}   max ratio '
-              f'{ab["lstm_pos"]["max"] / max(ab["cv_pos"]["max"], 1e-9):.2f}')
-        print()
-        if tr < mr * 0.6:
-            print('  TAIL MUCH SHORTER THAN THE MEAN SUGGESTS.')
-            print('  Consistent with V3b section 5.4: the LSTM advantage is')
-            print('  in error BEHAVIOUR, not accuracy. Large excursions are')
-            print('  what drive descent into empty space, and they are what')
-            print('  the elimination of below_platform failures looks like.')
-        elif tr > mr * 1.4:
-            print('  TAIL RELATIVELY WORSE THAN THE MEAN.')
-            print('  This CONTRADICTS the section 5.4 hypothesis.')
-        else:
-            print('  TAIL AND MEAN SCALE TOGETHER.')
-            print('  The section 5.4 hypothesis is NOT supported: error')
-            print("  behaviour does not explain V3b's advantage, and the")
-            print('  report should say the mechanism is unexplained rather')
-            print('  than keep a hypothesis the data does not carry.')
+        mx = ab['lstm_pos']['max'] / max(ab['cv_pos']['max'], 1e-9)
+        print(f'    LSTM/CV all blind frames:  mean {mr:.2f}   p99 {tr:.2f}'
+              f'   max {mx:.2f}')
+        print(f'    worst single error:  CV {ab["cv_pos"]["max"]:.3f} m'
+              f'   LSTM {ab["lstm_pos"]["max"]:.3f} m')
     print('=' * 96)
 
     with open(args.out, 'w') as f:
         json.dump({'policy': args.policy, 'obs_source': args.obs_source,
-                   'episodes': args.episodes, 'successes': successes,
-                   'bins': out}, f, indent=2)
+            'episodes': args.episodes, 'successes': successes,
+            'excursion_cells': {f'{k[0]}|{k[1]}': v
+                                for k, v in cells.items()},
+            'bins': out}, f, indent=2)
     print(f'  wrote {args.out}')
 
 

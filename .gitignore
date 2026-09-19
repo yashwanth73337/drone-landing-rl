@@ -13,3 +13,4 @@ results_recurrent/
 *.log
 *.pkl
 *.pre_*
+tb/
