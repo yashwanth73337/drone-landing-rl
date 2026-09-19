@@ -364,7 +364,44 @@ class CurriculumAndCheckpointCallback(BaseCallback):
         2. evaluate once against that snapshot
         3. write the CSV row, labelled with the snapshot
         4. checkpoint selection, keyed on the snapshot's level
+        4b. per-level checkpoint, which nothing can overwrite across levels
         5. only now, decide promotion and mutate state
+
+
+    PER-LEVEL CHECKPOINTS (step 4b) -- added 19 Sep 2026
+    ------------------------------------------------------------------------
+    The step-4 rule is lexicographic on (level, success_rate, -precision), so
+    curriculum level dominates absolutely. That has now failed twice, in
+    opposite directions:
+
+        - the original ceiling bug: 100% at an easy level can never be
+          beaten, so saves froze. Fixed by making level dominant.
+        - V3b seed 2: at 570k the rule compared level 7 @ 0% against the
+          saved level 6 @ 90% and saved the level-7 one. Evaluated on one
+          fixed task afterwards, the discarded policy scored 67.0% and the
+          saved one 17.0%. The run's designated artefact was four times
+          worse than the policy it replaced.
+
+    Both follow from treating a STATE VARIABLE as a PERFORMANCE MEASURE.
+
+    The step-4 rule is deliberately left UNCHANGED here. It produced every
+    best_success_model already reported, and altering it would silently
+    invalidate cross-run comparisons against V3a -- a frozen baseline. The
+    failure is instead made non-destructive: a separate best checkpoint is
+    kept for every curriculum level, so a promotion onto a level the policy
+    cannot fly can no longer destroy the best policy at the level it could.
+
+    Model only, no replay buffer: 12 levels of buffer would be ~1.6 GB per
+    run, and a buffer is needed only to CONTINUE training, not to evaluate.
+
+    Also added: a loud warning when the newly-saved global best scores BELOW
+    the best seen at any earlier level. That is exactly the seed-2 situation,
+    and it was previously silent -- the log line read "NEW BEST saved at
+    level 7 (20.0%)", which looks like progress.
+
+    Nothing here draws from any RNG stream (model.save() is pure
+    serialisation), so seed-matched reproduction is unaffected.
+    See V3b_REPORT.md section 5.5.
     """
 
     LEVELS = CURRICULUM_LEVELS
@@ -391,6 +428,11 @@ class CurriculumAndCheckpointCallback(BaseCallback):
         self.best_success_rate = -1.0
         self.best_precision = float("inf")
         self.csv_path = os.path.join(save_dir, "success_evaluations.csv")
+
+        # Per-level bests. Additive -- the global best above is untouched.
+        self.best_by_level = {}        # level -> (success_rate, -precision)
+        self.best_any_rate = -1.0      # highest success rate at ANY level
+        self.best_any_level = -1
 
     # ---- curriculum ---------------------------------------------------
     def _apply_level(self, level):
@@ -442,6 +484,34 @@ class CurriculumAndCheckpointCallback(BaseCallback):
                 w.writeheader()
             w.writerow(r)
 
+    def _write_level_manifest(self):
+        """Rewrite the per-level checkpoint index.
+
+        Rewritten rather than appended so it always shows the CURRENT best
+        per level, which is what a later evaluation needs in order to pick a
+        file. The full evaluation history is already in
+        success_evaluations.csv.
+
+        The task columns are included deliberately: every evaluation in this
+        project must be reported WITH the task it was measured on, and this
+        file is where a later reader finds the right --radius-max / --speed
+        for each checkpoint.
+        """
+        path = os.path.join(self.save_dir, "best_per_level.csv")
+        with open(path, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["level", "spawn_radius_min", "spawn_radius_max",
+                        "platform_speed_range", "checkpoint",
+                        "success_rate", "precision_cm"])
+            for lvl in sorted(self.best_by_level):
+                rate, neg_prec = self.best_by_level[lvl]
+                hi, speed = self.LEVELS[lvl]
+                prec = ("" if neg_prec == -float("inf")
+                        else round(-neg_prec, 4))
+                w.writerow([lvl + 1, self.radius_min, hi, speed,
+                            f"best_L{lvl + 1:02d}.zip",
+                            round(rate, 3), prec])
+
     def _on_step(self):
         if (self.num_timesteps - self.last_eval_timestep
                 < self.eval_every_timesteps):
@@ -488,12 +558,21 @@ class CurriculumAndCheckpointCallback(BaseCallback):
         # Lexicographic (level, success_rate, -precision): a harder level
         # always wins. Comparing success rate alone means a 100% at an easy
         # level can never be beaten, because 100% is the ceiling.
+        #
+        # LEFT UNCHANGED ON PURPOSE -- this rule produced every
+        # best_success_model already reported. Its failure mode is handled
+        # additively in 4b rather than by altering it. See the class
+        # docstring.
         key = (snapshot["level"], res["success_rate"],
                -res["precision_mean_cm"] if res["successes"]
                else -float("inf"))
         best = (self.best_level, self.best_success_rate, -self.best_precision)
 
         if res["successes"] > 0 and key > best:
+            # Captured before best_any_* is updated below, so it compares
+            # against the historical maximum, not this evaluation.
+            regressed = (self.best_any_rate >= 0.0
+                         and res["success_rate"] < self.best_any_rate)
             self.best_level = snapshot["level"]
             self.best_success_rate = res["success_rate"]
             self.best_precision = res["precision_mean_cm"]
@@ -506,6 +585,40 @@ class CurriculumAndCheckpointCallback(BaseCallback):
                 print(f"         NEW BEST saved at level "
                       f"{snapshot['level'] + 1} "
                       f"({res['success_rate']:.1f}%)")
+                if regressed:
+                    print(f"         WARNING: this scores BELOW the best "
+                          f"seen at any level "
+                          f"({self.best_any_rate:.1f}% at level "
+                          f"{self.best_any_level + 1}). Curriculum level "
+                          f"dominates the selection key, so "
+                          f"best_success_model.zip is NOT the best policy "
+                          f"this run produced.")
+                    print(f"         Use best_L"
+                          f"{self.best_any_level + 1:02d}.zip instead, and "
+                          f"see best_per_level.csv.")
+
+        # ---- 4b. PER-LEVEL BEST, which nothing can overwrite -----------
+        # The step-4 rule can only ever move to a HIGHER level, so once a
+        # promotion happens the best policy at the previous level becomes
+        # unrecoverable. These files make that impossible.
+        lvl = snapshot["level"]
+        lvl_key = (res["success_rate"],
+                   -res["precision_mean_cm"] if res["successes"]
+                   else -float("inf"))
+        if (res["successes"] > 0
+                and lvl_key > self.best_by_level.get(
+                    lvl, (-1.0, -float("inf")))):
+            self.best_by_level[lvl] = lvl_key
+            self.model.save(
+                os.path.join(self.save_dir, f"best_L{lvl + 1:02d}"))
+            self._write_level_manifest()
+            if self.verbose:
+                print(f"         per-level best: best_L{lvl + 1:02d}.zip "
+                      f"({res['success_rate']:.1f}%)")
+
+        if res["successes"] > 0 and res["success_rate"] > self.best_any_rate:
+            self.best_any_rate = res["success_rate"]
+            self.best_any_level = snapshot["level"]
 
         # ---- 5. ONLY NOW may promotion mutate the state ----------------
         at_final = self.level >= len(self.LEVELS) - 1
