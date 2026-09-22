@@ -1,0 +1,31 @@
+==========================================================================
+  V3b EVALUATION -- CUSTOM TASK (not the final benchmark)
+==========================================================================
+  model     : results_lstm_v3b/run_20260914_195837/best_success_model.zip
+  estimator : temporal_estimator_v3b_r2.pt (FROZEN)
+  task      : radius 0.11-0.23 m, speed 0.0 m/s
+  episodes  : 100  (seeds 9000..)
+
+[INFO] BaseAviary.__init__() loaded parameters from the drone's .urdf:
+[INFO] m 0.027000, L 0.039700,
+[INFO] ixx 0.000014, iyy 0.000014, izz 0.000022,
+[INFO] kf 3.160000e-10, km 7.940000e-12,
+[INFO] t2w 2.250000, max_speed_kmh 30.000000,
+[INFO] gnd_eff_coeff 11.368590, prop_radius 0.023135,
+[INFO] drag_xy_coeff 0.000001, drag_z_coeff 0.000001,
+[INFO] dw_coeff_1 2267.180000, dw_coeff_2 0.160000, dw_coeff_3 -0.110000
+[LSTMLanderAviary] actor_obs_source = LSTM  |  CV and LSTM estimators both live (passive unless selected)
+  success              : 85/100 (85.0%)
+  precision            : 5.305 +/- 2.448 cm
+  near-miss            : 15
+  failure reasons      : {'timeout': 15}
+  blind fraction       : 53.1%
+  longest blind run    : 78.4 steps
+  steps before 1st det : 0.00
+  pos estimation error : 0.01251 m
+  vel estimation error : 0.21809 m/s
+==========================================================================
+  NOT comparable to the final-task numbers in V2/V3a.
+  This run used radius 0.11-0.23 m, speed 0.0 m/s.
+  Report this number WITH those settings attached.
+==========================================================================

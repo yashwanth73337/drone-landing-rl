@@ -1,0 +1,78 @@
+==============================================================================
+  V3b MOVING-PAD DIAGNOSTIC -- no training
+==============================================================================
+  model     : results_lstm_v3b/run_20260914_195837/best_success_model.zip
+  estimator : temporal_estimator_v3b_r2.pt (FROZEN)
+  task      : radius 0.11-0.23 m, speeds [0.1] m/s
+  sources   : ['lstm', 'privileged']
+  episodes  : 100 per cell (seeds 9000..)
+  output    : eval_logs/diag_moving_20260923_002717
+==============================================================================
+
+  running source=lstm speed=0.10 ...
+[INFO] BaseAviary.__init__() loaded parameters from the drone's .urdf:
+[INFO] m 0.027000, L 0.039700,
+[INFO] ixx 0.000014, iyy 0.000014, izz 0.000022,
+[INFO] kf 3.160000e-10, km 7.940000e-12,
+[INFO] t2w 2.250000, max_speed_kmh 30.000000,
+[INFO] gnd_eff_coeff 11.368590, prop_radius 0.023135,
+[INFO] drag_xy_coeff 0.000001, drag_z_coeff 0.000001,
+[INFO] dw_coeff_1 2267.180000, dw_coeff_2 0.160000, dw_coeff_3 -0.110000
+[LSTMLanderAviary] actor_obs_source = LSTM  |  CV and LSTM estimators both live (passive unless selected)
+  done in 4.1 min: {'below_platform': 27, 'success': 44, 'timeout': 29}
+
+  running source=privileged speed=0.10 ...
+[INFO] BaseAviary.__init__() loaded parameters from the drone's .urdf:
+[INFO] m 0.027000, L 0.039700,
+[INFO] ixx 0.000014, iyy 0.000014, izz 0.000022,
+[INFO] kf 3.160000e-10, km 7.940000e-12,
+[INFO] t2w 2.250000, max_speed_kmh 30.000000,
+[INFO] gnd_eff_coeff 11.368590, prop_radius 0.023135,
+[INFO] drag_xy_coeff 0.000001, drag_z_coeff 0.000001,
+[INFO] dw_coeff_1 2267.180000, dw_coeff_2 0.160000, dw_coeff_3 -0.110000
+[LSTMLanderAviary] actor_obs_source = PRIVILEGED  |  CV and LSTM estimators both live (passive unless selected)
+  done in 4.7 min: {'timeout': 55, 'success': 40, 'below_platform': 5}
+
+==============================================================================
+  1. OUTCOMES -- same policy, same seeds, only actor_obs_source differs
+==============================================================================
+  source      speed  success  timeout  below_pl  other  near-miss   blind
+  lstm         0.10    44.0%       29        27      0         54   65.4%
+  privileged   0.10    40.0%       55         5      0         31   69.6%
+
+==============================================================================
+  2. BELIEF vs TRUTH over the last 30 steps, by outcome (means, metres)
+==============================================================================
+  below_platform with believed SMALL and true LARGE  -> estimate
+  below_platform with believed ~ true, both LARGE    -> policy
+
+  source      speed  outcome            n   blind  believed     true  LSTM err
+  lstm         0.10  success           44   99.0%    0.0661   0.0705    0.0509
+  lstm         0.10  below_platform    27  100.0%    0.1421   0.4798    0.4506
+  lstm         0.10  timeout           29  100.0%    0.1828   0.2423    0.2452
+  privileged   0.10  success           40   98.3%    0.0597   0.0650    0.0543
+  privileged   0.10  below_platform     5  100.0%    0.2606   0.4214    0.2343
+  privileged   0.10  timeout           55   99.8%    0.3803   0.3015    0.5296
+
+==============================================================================
+  3. ESTIMATION ERROR BY BLIND AGE (3-D position error, metres)
+     LSTM = what the actor sees under source=lstm.
+     CV   = constant-velocity estimate on the SAME frames (passive).
+==============================================================================
+  source      speed  bin             frames  LSTM mean     p95     max   CV mean     p95     max
+  lstm         0.10  visible           4809     0.0230   0.053   0.172    0.0122   0.022   0.045
+  lstm         0.10  blind 1-15        1630     0.0273   0.057   0.218    0.0365   0.099   0.754
+  lstm         0.10  blind 16-60       3765     0.0909   0.226   0.580    0.1547   0.413   2.702
+  lstm         0.10  blind 61-120      3186     0.2261   0.622   1.112    0.3902   1.081   5.362
+  lstm         0.10  blind >120        4837     0.2798   1.123   1.757    0.7939   1.958  11.259
+  privileged   0.10  visible           4723     0.0267   0.053   1.910    0.0125   0.023   0.045
+  privileged   0.10  blind 1-15        1677     0.0674   0.117   2.109    0.0572   0.304   0.686
+  privileged   0.10  blind 16-60       4010     0.2284   1.190   1.985    0.2454   1.320   2.731
+  privileged   0.10  blind 61-120      3790     0.5290   1.809   2.378    0.5931   3.339   5.456
+  privileged   0.10  blind >120        7172     0.5232   1.692   2.294    1.3669   7.995  11.860
+
+==============================================================================
+  CSVs: eval_logs/diag_moving_20260923_002717/episodes.csv, eval_logs/diag_moving_20260923_002717/error_by_blind_age.csv
+  CHECK FIRST: the lstm rows in table 1 must match the
+  train_lstm_v3b.py --eval result for the same model/task/seeds.
+==============================================================================
