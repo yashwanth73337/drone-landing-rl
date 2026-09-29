@@ -2,7 +2,8 @@ drone-landing-rl-venv/
 __pycache__/
 *.pyc
 results/
-models/
+/models/
+src/models/*.pt
 *.zip
 !src/scripts/results_lander/*_final.zip
 *.pth
