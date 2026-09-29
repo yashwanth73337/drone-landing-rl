@@ -911,12 +911,15 @@ def train(args):
         gae_lambda=args.gae_lambda,
         clip_range=args.clip_range,
         ent_coef=args.ent_coef,
+        use_sde=args.use_sde,
+        sde_sample_freq=args.sde_sample_freq,
         aux_coef=args.aux_coef,
         ap_alpha=args.ap_alpha, ap_beta=args.ap_beta, ap_tau=args.ap_tau,
         policy_kwargs=dict(
             lstm_hidden_size=args.lstm_hidden,
             n_lstm_layers=args.lstm_layers,
             est_hidden=args.est_hidden,
+            log_std_init=args.log_std_init,
             net_arch=dict(pi=[256, 128], vf=[256, 128]),
         ),
         tensorboard_log=os.path.join(run_dir, 'tb'),
@@ -1011,6 +1014,20 @@ def main():
     ap.add_argument('--gae-lambda', type=float, default=0.95)
     ap.add_argument('--clip-range', type=float, default=0.2)
     ap.add_argument('--ent-coef', type=float, default=0.0)
+    # dp = 0.1 * c_t is a VELOCITY command: the offset is taken from the
+    # current position each step, so it does not accumulate. White noise
+    # therefore integrates to no net displacement (measured: 0.1 m of descent
+    # in 300 steps against ~0.9 m for a true random walk), the progress reward
+    # never fires, and no per-step signal links descent actions to advantage.
+    # gSDE samples the noise as a function of state once per rollout, so
+    # sustained commands are actually explored.
+    ap.add_argument('--use-sde', action='store_true')
+    ap.add_argument('--sde-sample-freq', type=int, default=-1,
+                    help='-1 resamples the noise matrix once per rollout')
+    ap.add_argument('--log-std-init', type=float, default=0.0,
+                    help='0.0 -> std 1.0. -1.0 -> std 0.37, which keeps '
+                         'sampled actions in the gentle-descent band the '
+                         'reward pays for (gain ~1 in the probe)')
     ap.add_argument('--lstm-hidden', type=int, default=128)
     ap.add_argument('--lstm-layers', type=int, default=1)
     ap.add_argument('--est-hidden', type=int, default=256)

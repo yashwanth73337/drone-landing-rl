@@ -1,0 +1,48 @@
+{
+  "experiment": "V3b continuation into moving curriculum",
+  "source_run": "/home/yashu/mtp/drone-landing-rl/src/scripts/results_lstm_v3b/run_20260914_195837",
+  "resume_from": "best_success",
+  "model": "/home/yashu/mtp/drone-landing-rl/src/scripts/results_lstm_v3b/run_20260914_195837/best_success_model.zip",
+  "replay_buffer": "/home/yashu/mtp/drone-landing-rl/src/scripts/results_lstm_v3b/run_20260914_195837/best_success_replay_buffer.pkl",
+  "resume_timestep": 560000,
+  "buffer_transitions": 559996,
+  "last_evaluated_level": 5,
+  "start_level": 6,
+  "start_task": {
+    "radius_min": 0.11,
+    "radius_max": 0.26,
+    "platform_speed": 0.0
+  },
+  "additional_steps": 600000,
+  "seed": 1,
+  "estimator": "/home/yashu/mtp/drone-landing-rl/src/models/temporal_estimator_v3b_r2.pt",
+  "estimator_sha256": "8ab395ac9a33449601d89aba625e181c1fd0bb50c0e8d81faab9b998eb319cc9",
+  "actor_obs_source": "lstm",
+  "rng_state_restored": false,
+  "allow_buffer_mismatch": false,
+  "history_rows_copied": {
+    "success": 112,
+    "perception": 22
+  },
+  "git": {
+    "commit": "b0df8f167735997b73d9a7358cd54d035d28237e",
+    "dirty": true
+  },
+  "argv": [
+    "continue_v3b.py",
+    "--run-dir",
+    "results_lstm_v3b/run_20260914_195837",
+    "--resume-from",
+    "best_success",
+    "--start-level",
+    "6",
+    "--estimator",
+    "../models/temporal_estimator_v3b_r2.pt",
+    "--additional-steps",
+    "600000"
+  ],
+  "started": "2026-09-23 01:15:19",
+  "finished": "2026-09-23 13:18:50",
+  "final_timestep": 1160000,
+  "elapsed_hours": 12.059
+}

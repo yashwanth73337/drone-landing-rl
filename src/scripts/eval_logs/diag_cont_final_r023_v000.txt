@@ -1,0 +1,70 @@
+==============================================================================
+  V3b MOVING-PAD DIAGNOSTIC -- no training
+==============================================================================
+  model     : results_lstm_v3b_cont/cont_20260923_011516/final_model.zip
+  estimator : temporal_estimator_v3b_r2.pt (FROZEN)
+  task      : radius 0.11-0.23 m, speeds [0.0] m/s
+  sources   : ['lstm', 'privileged']
+  episodes  : 100 per cell (seeds 9000..)
+  output    : eval_logs/diag_moving_20260923_154951
+==============================================================================
+
+  running source=lstm speed=0.00 ...
+[INFO] BaseAviary.__init__() loaded parameters from the drone's .urdf:
+[INFO] m 0.027000, L 0.039700,
+[INFO] ixx 0.000014, iyy 0.000014, izz 0.000022,
+[INFO] kf 3.160000e-10, km 7.940000e-12,
+[INFO] t2w 2.250000, max_speed_kmh 30.000000,
+[INFO] gnd_eff_coeff 11.368590, prop_radius 0.023135,
+[INFO] drag_xy_coeff 0.000001, drag_z_coeff 0.000001,
+[INFO] dw_coeff_1 2267.180000, dw_coeff_2 0.160000, dw_coeff_3 -0.110000
+[LSTMLanderAviary] actor_obs_source = LSTM  |  CV and LSTM estimators both live (passive unless selected)
+  done in 11.3 min: {'timeout': 100}
+
+  running source=privileged speed=0.00 ...
+[INFO] BaseAviary.__init__() loaded parameters from the drone's .urdf:
+[INFO] m 0.027000, L 0.039700,
+[INFO] ixx 0.000014, iyy 0.000014, izz 0.000022,
+[INFO] kf 3.160000e-10, km 7.940000e-12,
+[INFO] t2w 2.250000, max_speed_kmh 30.000000,
+[INFO] gnd_eff_coeff 11.368590, prop_radius 0.023135,
+[INFO] drag_xy_coeff 0.000001, drag_z_coeff 0.000001,
+[INFO] dw_coeff_1 2267.180000, dw_coeff_2 0.160000, dw_coeff_3 -0.110000
+[LSTMLanderAviary] actor_obs_source = PRIVILEGED  |  CV and LSTM estimators both live (passive unless selected)
+  done in 10.2 min: {'timeout': 100}
+
+==============================================================================
+  1. OUTCOMES -- same policy, same seeds, only actor_obs_source differs
+==============================================================================
+  source      speed  success  timeout  below_pl  other  near-miss   blind
+  lstm         0.00     0.0%      100         0      0          1    1.0%
+  privileged   0.00     0.0%      100         0      0          0    0.3%
+
+==============================================================================
+  2. BELIEF vs TRUTH over the last 30 steps, by outcome (means, metres)
+==============================================================================
+  below_platform with believed SMALL and true LARGE  -> estimate
+  below_platform with believed ~ true, both LARGE    -> policy
+
+  source      speed  outcome            n   blind  believed     true  LSTM err
+  lstm         0.00  timeout          100    1.5%    0.0551   0.0492    0.0263
+  privileged   0.00  timeout          100    0.1%    0.0865   0.0810    0.0333
+
+==============================================================================
+  3. ESTIMATION ERROR BY BLIND AGE (3-D position error, metres)
+     LSTM = what the actor sees under source=lstm.
+     CV   = constant-velocity estimate on the SAME frames (passive).
+==============================================================================
+  source      speed  bin             frames  LSTM mean     p95     max   CV mean     p95     max
+  lstm         0.00  visible          29692     0.0734   0.139   0.245    0.0089   0.018   0.037
+  lstm         0.00  blind 1-15         194     0.0868   0.177   0.215    0.0135   0.032   0.115
+  lstm         0.00  blind 16-60         57     0.2105   0.279   0.299    0.0779   0.146   0.153
+  lstm         0.00  blind 61-120        57     0.2703   0.307   0.329    0.2294   0.296   0.305
+  privileged   0.00  visible          29924     0.0827   0.237   0.489    0.0115   0.018   0.029
+  privileged   0.00  blind 1-15          76     0.0663   0.153   0.237    0.0148   0.029   0.058
+
+==============================================================================
+  CSVs: eval_logs/diag_moving_20260923_154951/episodes.csv, eval_logs/diag_moving_20260923_154951/error_by_blind_age.csv
+  CHECK FIRST: the lstm rows in table 1 must match the
+  train_lstm_v3b.py --eval result for the same model/task/seeds.
+==============================================================================

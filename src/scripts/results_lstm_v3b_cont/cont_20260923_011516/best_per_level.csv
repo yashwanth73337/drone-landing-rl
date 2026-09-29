@@ -1,0 +1,2 @@
+level,spawn_radius_min,spawn_radius_max,platform_speed_range,checkpoint,success_rate,precision_cm
+6,0.11,0.26,0.0,best_L06.zip,75.0,5.5831
