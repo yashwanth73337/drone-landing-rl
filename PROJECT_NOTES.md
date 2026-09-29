@@ -872,3 +872,68 @@ continuation (LSTM) both collapsed into hovering; V4 never descended at all.
 
 **Semester 2:** sim-to-real onto the lab's ArduPilot quadrotors and hexarotors,
 with real UWB ranging and ArUco markers under ROS.
+
+---
+
+## 14. Infrastructure — migration to the lab desktop (29 Sep 2026)
+
+Work moved from the laptop to a lab desktop (4 GB VRAM vs the laptop's 8 GB,
+but idle and available for long runs) ahead of starting V5. The desktop had
+an outdated clone of the repo.
+
+**What moved and how:**
+
+- **Code** — `git pull` on the desktop (8 commits behind, clean fast-forward).
+- **Checkpoints** (`*.zip`, `*.pt` under `src/models/` and the run directories)
+  — copied by USB, since these are deliberately gitignored.
+- **Python environment** — the desktop already had its own
+  `drone-landing-rl-venv` and `requirements.txt`; not rebuilt from the
+  laptop's.
+
+**Bug found: `.gitignore` line 5 (`models/`, no leading slash) matched
+`src/models/` as well as the intended top-level `models/`.** As a result
+`src/models/temporal_estimator.py` and `__init__.py` — the actual LSTM
+estimator class, not just its weights — had **never been tracked by git**,
+on either machine. The USB transfer only carried `*.pt` files, so the
+desktop had the trained weights but not the code that defines the class,
+and failed on `ModuleNotFoundError: No module named 'models.temporal_estimator'`
+the first time anything tried to import it.
+
+Fixed by anchoring the rule to the repo root and tracking the source files:
+
+```
+# before
+models/
+
+# after
+/models/
+src/models/*.pt
+```
+
+then `git add -f src/models/__init__.py src/models/temporal_estimator.py`
+(plus the two validation JSONs, kept for the record) and pushed. **Any other
+`src/<subpackage>/` that happens to be named the same as a gitignored
+top-level directory is at risk of the same silent exclusion — worth a
+one-time audit if a new subpackage is added.**
+
+**Verification — reproducing the known V3b seed 1 eval on the desktop**
+(`best_success_model.zip`@560k, r 0.11–0.23 m, stationary, 100 episodes,
+seed base 9000):
+
+| | Laptop (reference) | Desktop (after fix) |
+|---|---|---|
+| success | 85/100 | 87/100 |
+| failures | 15 timeout, 0 below_platform | 12 timeout, 1 below_platform |
+| blind fraction | 53.1% | 52.4% |
+| longest blind run | 78.4 steps | 74.9 steps |
+| position est. error | 0.01251 m | 0.01247 m |
+| velocity est. error | 0.21809 m/s | 0.21594 m/s |
+
+Package versions matched exactly on both machines (sb3 2.9.0, torch
+2.13.0+cu130, cv2 5.0.0, pybullet 3.2.7), so the residual difference is most
+likely floating-point non-determinism in physics stepping and NN inference
+across different hardware, not a code or checkpoint mismatch — the error
+metrics agree to 3–4 significant figures and the 2-episode success swing is
+within the noise a handful of borderline seeds would produce. **Treat
+desktop vs laptop runs as reproducible in aggregate, not bit-identical.**
+Migration considered verified; V5 work proceeds on the desktop.
