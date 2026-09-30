@@ -314,6 +314,22 @@ consistent with it.
 
 The 512-episode window also fixes the noisy 20-episode promotion problem (notes §7).
 
+### Block 10 verified (30 Sep 2026), `envs/curriculum.py`, `tests/test_block10_curriculum.py`, 9/9 pass
+
+- **Implementation:** `Curriculum.record(success, c_episode)` works on non-overlapping windows of 512 **counted** episodes, pooled over envs. It promotes at ≥ 80% (inclusive: 410/512 promotes, 409/512 does not), with no demotion, capped at level 80.
+- **Stale episodes:** results are tagged with the c each episode *started* at (`info['c_episode']`), so episodes in flight during a promotion are ignored for the new level (tested).
+- **Env hook:** `env.set_c(c)` takes effect at the next reset, never mid-episode (tested, also through `AsyncVectorEnv.call`). `state_dict()` round-trips for resuming.
+- **Synthetic streams:** p = 0.95 promotes exactly every window and reaches 80 after 7 × 512 = **3,584 episodes** (the minimum possible); p = 0.70 never moves.
+- **Promotion noise (exact binomial, per window):**
+
+| true success p | 0.70 | 0.75 | 0.78 | 0.80 | 0.82 | 0.85 |
+|---|---|---|---|---|---|---|
+| P(promote) | 0.0000 | 0.0039 | 0.139 | 0.509 | 0.882 | 0.999 |
+
+  The V-series rule (one 20-episode evaluation, 90% threshold) promoted a true-80% policy ~1 in 5 (notes §7). Here a true-75% policy promotes on 0.4% of windows.
+- **Note:** training never runs at c = 0 (level 10 → c = 0.125). The only zero-motion condition is evaluation.
+
+
 ## 8. Domain randomisation (Table II, p.5545)
 
 | Parameter | Range | When | Status |
@@ -509,7 +525,7 @@ r_active_t = −α · [β (L_est_t+1 − τ)]_0^1, with α = 0.1, β = 1.0, τ =
 | 7 | CNN perception (ArUco base) | **DONE 30 Sep: 5/5** (§10); probe data-limited as expected |
 | 8 | Obs/action interfaces | **DONE 30 Sep: 10/10** (§10), privilege boundary tested |
 | 9 | Reward | **DONE 30 Sep: 19/19** (§6); D3 → literal after the landscape |
-| 10 | Curriculum | level logic on a synthetic success stream |
+| 10 | Curriculum | **DONE 30 Sep: 9/9** (§7) |
 | 11 | Network | dims per §10 |
 | 12 | PPO + L_est | smoke run (with your approval) |
 | 13 | r_active | hand-computed on a recorded rollout |

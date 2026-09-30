@@ -67,7 +67,7 @@ class ShinLandingEnv(gym.Env):
         self.action_space = spaces.Box(-1.0, 1.0, (4,), f32)
         self._blank = np.zeros((OBS_H, OBS_W), np.uint8)
 
-    # ---- curriculum hook (Block 10) --------------------------------------------
+    # ---- curriculum hook (Block 10): takes effect at the NEXT reset ---------------
     def set_c(self, c):
         self.c = float(np.clip(c, 0.0, 1.0))
 
@@ -77,6 +77,7 @@ class ShinLandingEnv(gym.Env):
         if seed is not None:
             self.sim._seed_streams(seed)           # gains stay as sampled at env init
         c = (options or {}).get("c", self.c)
+        self.c_episode = float(c)                  # tags this episode for the curriculum
         info = self.sim.reset(c=c, spawn=(options or {}).get("spawn"))
         if hasattr(self.reward_fn, "reset"):
             self.reward_fn.reset(self)
@@ -89,6 +90,7 @@ class ShinLandingEnv(gym.Env):
         obs, extra = self._obs()
         info.update(extra)
         info["action_cmd"] = a * ACTION_SCALE
+        info["c_episode"] = self.c_episode
         reward = float(self.reward_fn(self, info)) if self.reward_fn is not None else 0.0
         return obs, reward, terminated, truncated, info
 
