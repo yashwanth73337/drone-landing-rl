@@ -372,7 +372,7 @@ Tests: `tests/test_block5_oracle.py`, 4/4. The oracle subset is 50 episodes at c
 
 | Block | Paper | V5 (ArUco base) | Status |
 |---|---|---|---|
-| Visual encoder | frozen keypoint encoder + trainable CNN → l_t ∈ R^512 | trainable CNN, 5 conv layers (stride 2; channels 32, 64, 64, 128, 128), ELU → Linear → l_t ∈ R^512 | [paper] dim; architecture [unspecified] |
+| Visual encoder | frozen keypoint encoder + trainable CNN → l_t ∈ R^512 | `policies/encoder.py`: input 256×160 uint8 → x/255 − 0.5; 5 conv layers, stride 2, kernels (5, 3, 3, 3, 3), channels (32, 64, 64, 128, 128), ELU; 5×8×128 = 5120 → Linear → ELU → l_t ∈ R^512. **2,899,648 params**; no BatchNorm | [paper] dim; architecture [unspecified] |
 | Memory layer | LSTM; input [l_t, u_t]; h_t ∈ R^512 | 1-layer LSTM, hidden 512 | [paper]; layers [unspecified] |
 | State-estimation layer | MLP on [l_t, h_t, u_t] → y_t ∈ R^256 (N = 256) | MLP 1031 → 512 → 256, ELU, linear output | [paper] dims; hidden [unspecified] |
 | Estimate | s̃_rel = y_t[0:6] | same | [paper] |
@@ -381,6 +381,23 @@ Tests: `tests/test_block5_oracle.py`, 4/4. The oracle subset is 50 episodes at c
 
 **Privilege boundary:** the actor forward pass receives only (I_t, u_t). A unit
 test asserts that the actor output is invariant to s_rel.
+
+### Block 7 verified (30 Sep 2026), `tests/test_block7_encoder.py`, 5/5 pass
+
+- **Downsampling:** INTER_AREA 512×320 → 256×160 is the exact 2×2 mean (±0.5). Done env-side; rollouts store uint8 256×160 (40 KB per frame).
+- **Encoder:** output (B, 512), finite; 3-D and 4-D input identical; no batch dependence; gradients reach every parameter.
+- **Overfit check:** 48 rendered frames, 120 Adam steps → train R² 0.999 / 0.999 / 0.999 for the body-frame pad position. Images and labels are consistent, and the network can learn.
+
+**Probe (`scripts/probe_encoder.py`, supervised, single frame, pad centre in view, seeds from 20000; a diagnostic, not the method):**
+
+| run | frames (train) | DR | grad steps | train R² x/y/z | test R² x/y/z | test median error |
+|---|---|---|---|---|---|---|
+| CPU, tiny | 600 (480) | off | 480 | 0.999 / 0.995 / 0.999 | 0.78 / 0.56 / 0.83 | 0.59 m |
+| CPU, tiny | 1500 (1200) | on | 380 | — | 0.52 / 0.25 / −0.05 | 1.41 m |
+
+Held-out accuracy is **data- and step-limited** (2.9M params), not a pipeline fault. The DR run underfits at 380 steps. A GPU run with more frames is logged when available.
+
+**Finding for Blocks 12–13.** While the privileged oracle flies (it ignores the camera), the pad centre is **out of the image in ~50% of visited frames** (0.455 and 0.496 in two runs). Over or past the pad, the 60°-pitched camera looks ahead of it. A single frame cannot locate an unseen pad: this is the regime the LSTM, L_est and r_active exist for.
 
 ## 11. Learning
 
@@ -424,7 +441,7 @@ r_active_t = −α · [β (L_est_t+1 − τ)]_0^1, with α = 0.1, β = 1.0, τ =
 | 4 | Termination | **DONE 30 Sep: 12/12** (§9). D15 decided |
 | 5 | **Scripted oracle on true state** | **DONE 30 Sep: 99% at c = 1** (200 ep), random reachability OK (§9) |
 | 6 | Sensor noise + domain randomisation | **DONE 30 Sep: 17/17** (§8). Oracle under full DR 99% at c = 1 |
-| 7 | CNN perception (ArUco base) | shapes, gradients, no ground truth in actor input |
+| 7 | CNN perception (ArUco base) | **DONE 30 Sep: 5/5** (§10); probe data-limited as expected |
 | 8 | Obs/action interfaces | actor-invariance-to-s_rel test |
 | 9 | Reward | §6 test |
 | 10 | Curriculum | level logic on a synthetic success stream |
