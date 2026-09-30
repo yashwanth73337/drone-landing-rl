@@ -36,6 +36,7 @@ V5 does not import from or copy V1–V4 code (`src/envs`, `src/policies`,
 | D12 | Initial drone yaw | **ACCEPTED:** Face the pad ± U(−15°, 15°); rejection-sample until the pad centre is in the image. |
 | D13 | Ground textures (Table II: 50 IDs) | **ACCEPTED:** 50 procedurally generated textures from a seeded script. |
 | D15 | Collision geometry / success region (§9, Block 4) | **DECIDED 30 Sep: keep the paper's definition (pad-top contact) with the AerialGym 0.5 m box; also report strict success (`com_over_pad`) in every evaluation.** |
+| D16 | Vertical-speed action limit (§5) | **DECIDED 30 Sep, after P_smoke_s1: v_z limit ±1 m/s** (was ±3, [unspecified]). The paper's Fig. 9 shows descents of ≲ 1 m/s in every scenario; with ±3 the privileged policy dived at ~4.1 m/s impact. Env parameter `vz_max` (default 1.0); `reward_profile.py` keeps 3.0 because it studies the reward, not the limit. |
 | D14 | Training seeds per configuration | **ACCEPTED:** 3 for configurations that are reported; 1 for exploratory runs. |
 
 ---
@@ -190,7 +191,7 @@ Kinematics: straight line and circle exact to 1e-9 m, PyBullet body pose in sync
 | Critic obs | o_priv = [u_t, s_rel_t] (p.5545 §III-D1) | 13-D; u_t **clean** | [paper]; clean-vs-noisy [unspecified] |
 | Estimation target | s_rel = [Δx_b, Δv_b] ∈ R⁶: platform position and velocity relative to the drone, **in the body frame** (p.5544) | Δx = p_pad − p_drone; Δv = v_pad − v_drone; both rotated into the body frame | [paper]; difference direction [inferred] |
 | Action | a_t = [v_x, v_y, v_z, ω_z] velocity commands in the drone's **heading frame** (yaw-only rotated) (p.5543) | same | [paper] |
-| Action limits | not stated | v_xy ±10 m/s, v_z ±3 m/s, ω_z ±π/3 rad/s (= the controller clamp [AG]); policy output clipped to [−1, 1] then scaled | [unspecified] |
+| Action limits | not stated | v_xy ±10 m/s, **v_z ±1 m/s (D16; was ±3)**, ω_z ±π/3 rad/s (= the controller clamp [AG]); policy output clipped to [−1, 1] then scaled | [unspecified]; v_z [inferred] from Fig. 9 |
 
 Note on exploration: V4's white-noise failure came from position-offset actions
 that did not accumulate (notes §5). Velocity commands held for 0.1 s do integrate
@@ -623,3 +624,26 @@ v5_shin/
 /v5_shin/runs/**/*.pth
 /v5_shin/runs/**/*.pkl
 ```
+
+
+## 15. Runs log
+
+Every run: name, commit of the code, task, and outcome. Training-time numbers come from the **stochastic** policy; pinned evaluations (Block 14) are reported separately.
+
+### P_smoke_s1 (30 Sep 2026): privileged actor (variant P), seed 1, 2M steps, v_z limit ±3 (pre-D16)
+
+- **Config:** code at commit `2206a5c`; 16 envs × 256 steps; SPEC §11.1 PPO; literal D3; full DR; curriculum from level 10. 489 updates, 93k episodes, ~1,550 steps/s (≈ 22 min on the lab desktop). CSVs committed in `39d255b`.
+- **Learning:** 4/151 successes at update 1. Level 80 (c = 1) reached at ~update 120 (~0.5M steps). **Zero timeouts in the whole run** (no hover stall), zero drift after update 60.
+
+| updates | level | episodes | success | strict (CoM over pad) | impact v_z median (p10 / p90) | speed median | steps to land (median) |
+|---|---|---|---|---|---|---|---|
+| 0–60 | 10 | 12,412 | 0.438 | 0.301 | −4.10 (−5.68 / −2.93) | 4.51 m/s | 19 |
+| 60–120 | 80 | 12,317 | 0.792 | 0.646 | −4.18 | 4.68 | 20 |
+| 120–250 | 80 | 23,272 | 0.827 | 0.698 | −3.79 | 4.42 | 22 |
+| 250–400 | 80 | 28,264 | 0.891 | 0.785 | −4.09 | 4.64 | 21 |
+| 400–490 | 80 | 16,917 | **0.909** | **0.807** | −4.14 (−5.44 / −2.69) | 4.61 | 21 |
+
+- **Reading, control:** with perfect information, PPO with this reward and curriculum learns the full task (≈ 91% at c = 1, training-time). V4's failure to descend does not recur.
+- **Reading, landing style:** it **dives**. Median impact is −4.1 m/s throughout, landing ~2 s after spawn. This is the diving risk of the literal D3; it is inconsistent with the paper's Fig. 9 (≲ 1 m/s descents), which led to D16.
+- **Reading, D15:** about 1 in 9 "successes" is an edge contact with the CoM off the pad (0.909 vs 0.807).
+- **What this does NOT establish:** a pinned evaluation (seed 9000); more than one seed; behaviour under the D16 limit.

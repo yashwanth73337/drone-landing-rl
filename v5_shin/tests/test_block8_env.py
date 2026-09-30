@@ -192,3 +192,23 @@ def test_async_vector_env():
         assert obs["critic"].shape == (2, 13)
     finally:
         venv.close()
+
+
+@pytest.mark.parametrize("vz_max", [None, 3.0])
+def test_vertical_action_limit(vz_max):
+    """D16: default v_z limit 1 m/s (Fig. 9). A full-down action from 5 m lands at ~ -vz_max."""
+    kw = {} if vz_max is None else {"vz_max": vz_max}
+    expect = 1.0 if vz_max is None else vz_max
+    env = make(mode="privileged", dr=DRConfig.off(), gains_mode="nominal", reward_fn=None, **kw)
+    try:
+        env.reset(seed=0, options={"c": 0.0, "spawn": dict(pos=np.array([0, 0, PAD_TOP_Z + 5]),
+                                                          yaw=0.0, psi_plat=0.0)})
+        while True:
+            _, _, te, tr, info = env.step(np.array([0, 0, -1.0, 0]))
+            if te or tr:
+                break
+        print(f"\n[vz limit {expect}] outcome {info['outcome']} impact v_z {info['rel_vel'][2]:.3f} m/s")
+        assert info["outcome"] == "success" and info["action_cmd"][2] == -expect
+        assert info["rel_vel"][2] == pytest.approx(-expect, rel=0.05)
+    finally:
+        env.close()

@@ -25,22 +25,24 @@ import torch
 from v5_shin.envs.curriculum import Curriculum
 from v5_shin.envs.dr import DRConfig
 from v5_shin.envs.reward import ShinReward
-from v5_shin.envs.shin_env import ShinLandingEnv
+from v5_shin.envs.shin_env import VZ_MAX_DEFAULT, ShinLandingEnv
 from v5_shin.policies.ppo import PPOConfig, PPOTrainer
 
 RUNS = os.path.join(os.path.dirname(__file__), "..", "runs")
 
 
-def make_env_fn(mode, seed, renderer, vz_penalty, c, dr_off=False):
+def make_env_fn(mode, seed, renderer, vz_penalty, c, dr_off=False, vz_max=VZ_MAX_DEFAULT):
     def f():
         return ShinLandingEnv(mode=mode, renderer=renderer, egl=(renderer == "egl"), seed=seed, c=c,
-                              reward_fn=ShinReward(vz_penalty),
+                              reward_fn=ShinReward(vz_penalty), vz_max=vz_max,
                               dr=DRConfig.off() if dr_off else DRConfig())
     return f
 
 
-def make_venv(mode, n_envs, seed, renderer, vz_penalty, c, sync=False, dr_off=False):
-    fns = [make_env_fn(mode, seed * 1000 + i, renderer, vz_penalty, c, dr_off) for i in range(n_envs)]
+def make_venv(mode, n_envs, seed, renderer, vz_penalty, c, sync=False, dr_off=False,
+              vz_max=VZ_MAX_DEFAULT):
+    fns = [make_env_fn(mode, seed * 1000 + i, renderer, vz_penalty, c, dr_off, vz_max)
+           for i in range(n_envs)]
     kw = dict(autoreset_mode=gym.vector.AutoresetMode.SAME_STEP)
     if sync:
         return gym.vector.SyncVectorEnv(fns, **kw)
@@ -87,6 +89,8 @@ def main():
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--lambda-est", type=float, default=1.0, help="0 = w/o state estimation")
     ap.add_argument("--vz-penalty", choices=["literal", "prose"], default="literal")
+    ap.add_argument("--vz-max", type=float, default=VZ_MAX_DEFAULT,
+                    help="vertical-speed action limit (m/s); D16 default 1.0 (P_smoke_s1 used 3.0)")
     ap.add_argument("--renderer", choices=["egl", "tiny"], default="egl")
     ap.add_argument("--start-level", type=int, default=10)
     ap.add_argument("--ckpt-every", type=int, default=50, help="updates")
@@ -105,7 +109,7 @@ def main():
                     minibatches=a.minibatches, micro_chunks=micro, lr=a.lr,
                     lambda_est=(a.lambda_est if a.mode == "vision" else 0.0))
     cur = Curriculum(start_level=a.start_level)
-    venv = make_venv(a.mode, a.n_envs, a.seed, a.renderer, a.vz_penalty, cur.c)
+    venv = make_venv(a.mode, a.n_envs, a.seed, a.renderer, a.vz_penalty, cur.c, vz_max=a.vz_max)
     tr = PPOTrainer(venv, cfg, device=a.device, total_updates=total_updates)
     if a.resume:
         d = torch.load(os.path.join(run, "latest.pt"), map_location=a.device, weights_only=False)

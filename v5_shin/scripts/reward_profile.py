@@ -15,7 +15,12 @@ import numpy as np
 from v5_shin.envs.dr import DRConfig
 from v5_shin.envs.platform import PAD_TOP_Z
 from v5_shin.envs.reward import ShinReward
-from v5_shin.envs.shin_env import ACTION_SCALE, ShinLandingEnv
+from v5_shin.envs.shin_env import ShinLandingEnv, action_scale
+
+# This script studies the REWARD, so its scripted descents are not limited by the D16
+# action limit: it keeps the v_z limit that the Block 9 landscape was measured with.
+VZ_MAX_PROFILE = 3.0
+ACTION_SCALE = action_scale(VZ_MAX_PROFILE)
 
 RATES = [0.0, 0.3, 0.5, 1.0, 1.5, 2.5]          # m/s; 0.0 = hover
 BANDS = [(0.0, 1.0), (1.0, 2.0), (2.0, 4.0), (4.0, 7.0)]   # CoM height above pad top (m)
@@ -24,7 +29,8 @@ GAMMA = 0.99
 
 def fly(rate, vz_penalty, height=6.0, lateral=0.0):
     env = ShinLandingEnv(mode="privileged", renderer="tiny", egl=False, seed=0,
-                         dr=DRConfig.off(), reward_fn=ShinReward(vz_penalty), gains_mode="nominal")
+                         dr=DRConfig.off(), reward_fn=ShinReward(vz_penalty), gains_mode="nominal",
+                         vz_max=VZ_MAX_PROFILE)
     try:
         sp = dict(pos=np.array([-lateral, 0.0, PAD_TOP_Z + height]), yaw=0.0, psi_plat=0.0)
         env.reset(seed=0, options={"c": 0.0, "spawn": sp})
@@ -49,7 +55,7 @@ def hover_sweep(c, episodes=200, seed_base=9000, vz_penalty="literal"):
     """Discounted return of a pure hover (zero command) from Table I spawns, full DR.
     At c > 0 the platform drives away, so lateral progress turns negative."""
     env = ShinLandingEnv(mode="privileged", renderer="tiny", egl=False, seed=seed_base,
-                         reward_fn=ShinReward(vz_penalty))
+                         reward_fn=ShinReward(vz_penalty), vz_max=VZ_MAX_PROFILE)
     out = []
     try:
         for i in range(episodes):
@@ -77,7 +83,7 @@ def policy_sweep(policy, c, episodes=200, seed_base=9000, vz_penalty="literal", 
     from v5_shin.policies.oracle import OracleController
     orc = OracleController(v_down_max=v_down_max, v_down_min=min(0.4, v_down_max))
     env = ShinLandingEnv(mode="privileged", renderer="tiny", egl=False, seed=seed_base,
-                         reward_fn=ShinReward(vz_penalty))
+                         reward_fn=ShinReward(vz_penalty), vz_max=VZ_MAX_PROFILE)
     out = []
     try:
         for i in range(episodes):
