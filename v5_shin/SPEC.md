@@ -569,7 +569,7 @@ r_active_t = −α · [β (L_est_t+1 − τ)]_0^1, with α = 0.1, β = 1.0, τ =
 | 11 | Network | **DONE 30 Sep: 10/10** (§10), 5.85M params |
 | 12 | PPO + L_est | **BUILT 30 Sep: 10/10 CPU tests**; GPU fit check and smoke run need approval |
 | 13 | r_active | hand-computed on a recorded rollout |
-| 14 | Evaluation script | reproduces the oracle's result |
+| 14 | Evaluation script | **BUILT 30 Sep: `scripts/evaluate.py`, 3/3 tests**: per-episode seeds 9000 + i (gains re-drawn), deterministic mean actions, worker-count independent (tested), Wilson 95% CI, strict success, impact speed, vision est RMSE + blind-age bins |
 | 15 | PACMAN keypoint pad | single change, after the above |
 
 ## 13. Evaluation protocol
@@ -632,7 +632,7 @@ Every run: name, commit of the code, task, and outcome. Training-time numbers co
 
 ### P_smoke_s1 (30 Sep 2026): privileged actor (variant P), seed 1, 2M steps, v_z limit ±3 (pre-D16)
 
-- **Config:** code at commit `2206a5c`; 16 envs × 256 steps; SPEC §11.1 PPO; literal D3; full DR; curriculum from level 10. 489 updates, 93k episodes, ~1,550 steps/s (≈ 22 min on the lab desktop). CSVs committed in `39d255b`.
+- **Config:** code at commit `3b3b19a`; 16 envs × 256 steps; SPEC §11.1 PPO; literal D3; full DR; curriculum from level 10. 489 updates, 93k episodes, ~1,550 steps/s (≈ 22 min on the lab desktop). CSVs committed in `43bcb64`.
 - **Learning:** 4/151 successes at update 1. Level 80 (c = 1) reached at ~update 120 (~0.5M steps). **Zero timeouts in the whole run** (no hover stall), zero drift after update 60.
 
 | updates | level | episodes | success | strict (CoM over pad) | impact v_z median (p10 / p90) | speed median | steps to land (median) |
