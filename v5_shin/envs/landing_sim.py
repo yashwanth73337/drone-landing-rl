@@ -51,6 +51,18 @@ class LandingSim:
     def close(self):
         p.disconnect(self.cid)
 
+    def reseed(self, seed, resample_gains=True):
+        """Evaluation helper: per-episode seeding. Training samples gains once per env
+        ("Env. init", Table II); evaluation re-samples per episode so a pinned seed
+        set covers the whole gain range."""
+        from .lee_controller import LeeVelocityController
+        from .quad import MotorModel
+        self.rng = np.random.default_rng(seed)
+        if resample_gains:
+            self.gains = P.sample_gains(self.rng)
+            self.quad.ctrl = LeeVelocityController(self.gains)
+            self.quad.motors = MotorModel(self.rng)
+
     # ---- spawn ----------------------------------------------------------------
     def sample_spawn(self, c):
         """Table I + D12, rejection-sampled until the pad centre is in the image.
@@ -93,6 +105,10 @@ class LandingSim:
         assert not self.done, "call reset()"
         outcome, sub = None, P.SUBSTEPS
         for k in range(P.SUBSTEPS):
+            # velocities just before this substep: the contact solver zeroes the
+            # post-step velocity, so impact speed must be read pre-step
+            self._v_pre = self.quad.state()["v"]
+            self._vplat_pre = self.plat.velocity()
             self.quad.apply_control(cmd)
             self.plat.integrate()
             p.stepSimulation(physicsClientId=self.cid)
@@ -141,7 +157,7 @@ class LandingSim:
         rel = s["pos"] - self.plat.pad_center()
         c, sn = np.cos(self.plat.psi), np.sin(self.plat.psi)
         rel_pad = np.array([c * rel[0] + sn * rel[1], -sn * rel[0] + c * rel[1]])
-        v_rel = s["v"] - self.plat.velocity()
+        v_rel = self._v_pre - self._vplat_pre          # pre-contact (impact) relative velocity
         return dict(
             rel_pos=rel, rel_pos_pad=rel_pad, rel_vel=v_rel,
             tilt_deg=float(np.degrees(np.arccos(np.clip(s["R"][2, 2], -1, 1)))),

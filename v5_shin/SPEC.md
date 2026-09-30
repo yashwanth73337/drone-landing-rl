@@ -300,6 +300,33 @@ The 512-episode window also fixes the noisy 20-episode promotion problem (notes 
 - **Spawn (2000 resets, seed 20000):** 99.8% accepted on the first draw. KS passes for dx, dy, dz, ψ_0 and the D12 yaw offset. Pad-centre pixel row v spans 11–305 of 320 (median 190).
 - **D15 open, success region.** The LMF2 collision cube is 0.5 m, so pad-top contact is reachable with the CoM up to 0.75 + 0.25 = **1.0 m** from the pad centre, 0.25 m past the pad edge. Measured: CoM offset 0.97 m → `success` with `com_over_pad = False`; 1.03 m → `crash_ground`. The CoM sits 0.24 m above the pad at touchdown.
 
+### Block 5 verified (30 Sep 2026), scripted oracle on the TRUE state
+
+`policies/oracle.py` (privileged: velocity feedforward + P on the lagged relative position, descent gated by lateral error; it is **not** a baseline). `scripts/eval_oracle.py`, per-episode seeds 9000 + i, gains re-sampled per episode, 200 episodes each:
+
+| c | success | strict (`com_over_pad`) | failures | steps to land (mean) | touchdown error p95 | impact v_z (mean) |
+|---|---|---|---|---|---|---|
+| 0.0 | 100% | 100% | none | 52 | 0.056 m | −0.47 m/s |
+| 0.5 | 100% | 100% | none | 49 | 0.22 m | −0.61 m/s |
+| 1.0 | **99%** | 99% | 2 timeouts | 63 | 0.40 m | −0.62 m/s |
+
+**The task as built is solvable within the action limits at full difficulty.** The c = 1 timeouts come from the oracle's own gate logic: it holds altitude once more than 0.6 m off centre over a turning platform and never re-aligns. No crashes, tilts or drift.
+
+Random-policy reachability (uniform actions within the limits, 100 episodes):
+
+| hold | c | success | crash_ground | drift | tilt | median xy travel | median min height |
+|---|---|---|---|---|---|---|---|
+| 1 | 0 | 6 | 90 | 0 | 2 | 2.7 m | −0.50 m (reaches ground) |
+| 1 | 1 | 0 | 69 | 29 | 2 | 2.6 m | −0.41 m |
+| 10 | 0 | 0 | 23 | 55 | 22 | 12.7 m | 2.1 m |
+| 10 | 1 | 0 | 10 | 74 | 16 | 8.2 m | 3.7 m |
+
+- **The V4 exploration failure does not recur.** Random velocity commands move the drone metres and reach pad height; V4's position offsets moved it 0.1 m.
+- **Watch item, tilt.** Held full-scale random commands flip the drone in 16–22% of episodes. The velocity controller has no tilt limit (AerialGym faithful: `max_inclination_angle_rad` is defined but unused), and a 10 m/s step demands ~78° of tilt. Early PPO may crash this way; it costs −10 like any crash.
+- **Bug fixed.** Touchdown relative velocity was read after the contact solver had zeroed it (−0.05 m/s at c = 0). It is now read pre-contact: −0.47 m/s, and −0.969 m/s for a −1 m/s descent (tested).
+
+Tests: `tests/test_block5_oracle.py`, 4/4. The oracle subset is 50 episodes at c = 0 and c = 1.
+
 ## 10. Network (Figs. 3, 4, p.5544)
 
 | Block | Paper | V5 (ArUco base) | Status |
@@ -354,7 +381,7 @@ r_active_t = −α · [β (L_est_t+1 − τ)]_0^1, with α = 0.1, β = 1.0, τ =
 | 2 | Platform motion | **DONE 30 Sep: 10/10** (§3) |
 | 3 | Camera + ArUco pad + EGL; **throughput benchmark** | **DONE 30 Sep: 18/18** (§4). Benchmark on the lab desktop: *pending* |
 | 4 | Termination | **DONE 30 Sep: 12/12** (§9). D15 open |
-| 5 | **Scripted oracle on true state** | lands across Table I at c = 1 (target ≥ 90% over 200 episodes). Also a random-policy reachability check. |
+| 5 | **Scripted oracle on true state** | **DONE 30 Sep: 99% at c = 1** (200 ep), random reachability OK (§9) |
 | 6 | Sensor noise + domain randomisation | empirical statistics match §5 and §8 |
 | 7 | CNN perception (ArUco base) | shapes, gradients, no ground truth in actor input |
 | 8 | Obs/action interfaces | actor-invariance-to-s_rel test |

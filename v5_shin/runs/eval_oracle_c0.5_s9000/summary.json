@@ -1,0 +1,22 @@
+{
+  "success": 200,
+  "crash_ground": 0,
+  "crash_platform": 0,
+  "tilt": 0,
+  "drift": 0,
+  "timeout": 0,
+  "episodes": 200,
+  "success_rate": 1.0,
+  "strict_success_rate": 1.0,
+  "mean_steps_success": 49.495,
+  "touchdown_err_p95_m": 0.216297754823987,
+  "touchdown_vz_mean": -0.610111754659513,
+  "min_height_median": 0.292886322451234,
+  "net_xy_travel_median": 10.868079676659255,
+  "policy": "oracle",
+  "hold": 1,
+  "c": 0.5,
+  "seed_base": 9000,
+  "name": null,
+  "wall_s": 9.9
+}
