@@ -64,8 +64,7 @@ def test_mass_and_inertia_loaded():
         quad = LMF2Quad(cid, np.random.default_rng(0), P.sample_gains(None, "nominal"))
         info = p.getDynamicsInfo(quad.body, -1, physicsClientId=cid)
         assert info[0] == pytest.approx(P.MASS, abs=1e-6)
-        # merge re-diagonalises (principal axes); agreement within 0.3%
-        assert np.allclose(info[2], P.INERTIA, rtol=5e-3), info[2]
+        assert np.allclose(info[2], P.INERTIA, atol=1e-9), info[2]
     finally:
         p.disconnect(cid)
 

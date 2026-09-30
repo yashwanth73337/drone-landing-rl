@@ -42,10 +42,8 @@ class LMF2Quad:
         self.cid = client
         # URDF_USE_INERTIA_FROM_FILE is essential: without it PyBullet computes
         # inertia from the 0.5 m collision box (0.052 kg m^2, ~4x too large).
-        self.body = p.loadURDF(
-            URDF, [0, 0, 1],
-            flags=p.URDF_MERGE_FIXED_LINKS | p.URDF_USE_INERTIA_FROM_FILE,
-            physicsClientId=client)
+        self.body = p.loadURDF(URDF, [0, 0, 1], flags=p.URDF_USE_INERTIA_FROM_FILE,
+                               physicsClientId=client)
         p.changeDynamics(self.body, -1, linearDamping=P.LINEAR_DAMPING,
                          angularDamping=P.ANGULAR_DAMPING, physicsClientId=client)
         self.motors = MotorModel(rng)
@@ -88,8 +86,15 @@ class LMF2Quad:
                               physicsClientId=self.cid)
 
 
-def make_client(gui=False):
+def make_client(gui=False, egl=False):
+    """egl=True loads the EGL renderer plugin FIRST. PyBullet's EGL renderer
+    only draws bodies created after the plugin is loaded; loading it later
+    gives blank frames (found in Block 3)."""
     cid = p.connect(p.GUI if gui else p.DIRECT)
+    if egl:
+        from .camera import load_egl
+        if load_egl(cid) < 0:
+            raise RuntimeError("EGL renderer plugin failed to load")
     p.setGravity(0, 0, -P.G, physicsClientId=cid)
     p.setTimeStep(P.PHYSICS_DT, physicsClientId=cid)
     return cid

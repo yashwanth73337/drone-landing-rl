@@ -130,7 +130,17 @@ The test criteria were revised once, with the reasons recorded in the test docst
 | Pad top height | Fig. 9 z-plots show the platform at ≈1 m | 1.0 m | [inferred] Fig. 9, p.5548 |
 | Vertical heave | only in the "Boat" evaluation (Fig. 9, Table V) | off in training | [paper] |
 
-**Test:** 10k simulated episodes; empirical δv and δω histograms match U(·), and the clip-hit rate is logged.
+**Block 2 verified (30 Sep 2026), `tests/test_block2_platform.py`, 10/10 pass.** KS tests at α = 0.01 over 200 episodes × 300 steps, seed base 20000:
+
+| c | v_0 ~ U(0, 8c) | δv ~ U(±0.5c) | δω ~ U(±3c °/s) | v clip rate | ω clip rate | mean v | \|ω\| p95 |
+|---|---|---|---|---|---|---|---|
+| 0.125 | pass | pass | pass | 4.4% | 0.0% | 0.51 m/s | 5.7 °/s |
+| 0.5 | pass | pass | pass | 4.4% | 0.4% | 2.03 m/s | 22.2 °/s |
+| 1.0 | pass | pass | pass | 4.4% | 2.7% | 4.05 m/s | 28.6 °/s |
+
+Kinematics: straight line and circle exact to 1e-9 m, PyBullet body pose in sync, finite-difference velocity matches, c = 0 is stationary, runs are deterministic per seed. Order within a policy step: 10 physics substeps at the current (v, ω), then `perturb()`.
+
+**Watch item.** At c = 1 the yaw-rate walk sits near the ±30°/s clip by late episode (its unclipped SD after 300 steps ≈ 30°/s). That means tight turns: a radius of about 8 m at 4 m/s. The D6 clip is therefore an active constraint and will be reported as such.
 
 ## 4. Pad marking (visual target)
 
@@ -138,16 +148,40 @@ The test criteria were revised once, with the reasons recorded in the test docst
 |---|---|---|---|
 | Main method | PACMAN hexagonal keypoint pad [17] with frozen keypoint encoder (Fig. 3) | **later, as a single change** | [paper] |
 | Ablation "w/o keypoint encoder" | pad replaced by ArUco [19]; policy uses a "standard CNN trained end-to-end" (p.5546 §IV-B) | **V5 base configuration** | [paper] |
-| ArUco dictionary / id / size | not stated | DICT_4X4_50, id 0, outer black square 1.5 m (fills the pad), white border | [unspecified] |
+| ArUco dictionary / id / size | not stated | DICT_4X4_50, id 0. **Black square 1.2 m, centred, with a 0.15 m white margin** (a quiet zone is needed for detection by baseline H). Texture 768 px RGB. | [unspecified] |
 | ArUco usage | image → CNN. **No detection, no PnP.** | same. OpenCV ArUco appears only in the EKF+RL baseline (§11). | [paper] |
 | PACMAN weights | README says a pretrained detector is provided, but the link is a blank "(See)". The repo has C++/TensorRT inference only: no weights, no training code. It expects `pacman_fpn202506_1240_1624_int8.engine`. MIT licence. | requested from the authors (PyTorch checkpoint). Fallback: train our own from sim-projected keypoint labels using the Park et al. recipe (their Table 1, Eqs. 1–5). | [deviation] pending |
+
+### Block 3 rendering implementation (30 Sep 2026)
+
+- **Platform visual:** ONE closed box mesh (`assets/pad_box.obj`) with the marker texture on the top face only; the other faces sample a white texel. Collision is the plain 1.5 × 1.5 × 1.0 box. No extra bodies.
+- **Ground:** our own 200 × 200 m textured quad (`envs/ground.py`) with a plane collision shape. **No URDF-embedded textures anywhere.**
+- **Grayscale:** BT.601 luma (0.299, 0.587, 0.114), the same as `cv2.cvtColor`.
+- **Camera offset:** 0.15 m ahead of the CoM [unspecified], clear of the 0.25 m visual body.
+- **ArUco detector:** subpixel corner refinement (`CORNER_REFINE_SUBPIX`).
+
+**EGL pitfalls found and fixed (each has a regression test):**
+
+| # | Symptom | Cause | Fix |
+|---|---|---|---|
+| 1 | Blank frames | EGL only draws bodies created after the plugin loads | `make_client(egl=True)` loads the plugin first |
+| 2 | Pad shows the ground's checker | `plane.urdf`'s internal texture shifts `loadTexture` ids | no URDF textures; every texture comes from `loadTexture` |
+| 3 | Marker sheared diagonally | 750 px grayscale texture (GL row alignment) | RGB, width a multiple of 4 (768 px) |
+| 4 | Stripes; no detection beyond 3 m altitude | marker quad above the box top z-fights (EGL depth ≈ 15 mm at 7 m) | single box mesh, no coplanar surfaces |
+
+**Block 3 verified, `tests/test_block3_camera.py`, 18/18 pass** (TinyRenderer and EGL/llvmpipe here):
+
+- VFOV 64.01° and f_x = f_y = 256 px.
+- OpenCV detects id 0 and its corners match the analytic projection in corner order, at 5 poses (2–6 m, yaw 30°, roll 10°, platform moved and rotated 120°). Max error: EGL 0.69–0.88 px, TinyRenderer 1.13–1.56 px, against a 2 px limit.
+- Detected on the optical axis at every altitude from 2 to 8 m under both renderers.
+- One render per call; ground texture swap does not affect the marker; marker texture is RGB with width % 4 = 0; platform is one body with box collision.
 
 ## 5. Sensors, observation, action
 
 | Item | Paper | V5 | Status |
 |---|---|---|---|
 | Camera | grayscale pinhole, 512×320, 90° **horizontal** FOV (p.5546) → VFOV ≈ 64.0° | same | [paper] |
-| Camera mount | "60° downward pitch to the forward axis" (p.5543) | optical axis 60° below body +x (30° from nadir), at body origin | [paper]; offset [unspecified] |
+| Camera mount | "60° downward pitch to the forward axis" (p.5543) | optical axis 60° below body +x (30° from nadir), 0.15 m ahead of the CoM | [paper]; offset [unspecified] |
 | CNN input | not stated | 256×160 (D9), pixel values / 255 | [unspecified] |
 | Velocity sensor | body-frame velocity + 0.05 m/s Gaussian noise (p.5546) | N(0, 0.05²) per axis, every step | [paper]; per-axis σ [inferred] |
 | Attitude sensor | quaternion + 0.5° small-angle noise (p.5546) | small rotation, axis-angle components ~ N(0, (0.5°)²), composed with the true attitude | [paper]; model [inferred] |
@@ -301,8 +335,8 @@ r_active_t = −α · [β (L_est_t+1 − τ)]_0^1, with α = 0.1, β = 1.0, τ =
 | # | Component | Pass criterion |
 |---|---|---|
 | 1 | Physics + quad + controller | **DONE 30 Sep: 30/30** (§2.2) |
-| 2 | Platform motion | §3 test |
-| 3 | Camera + ArUco pad + EGL; **throughput benchmark** | pad centre projects to the analytically predicted pixel ±2 px; bench table logged |
+| 2 | Platform motion | **DONE 30 Sep: 10/10** (§3) |
+| 3 | Camera + ArUco pad + EGL; **throughput benchmark** | **DONE 30 Sep: 18/18** (§4). Benchmark on the lab desktop: *pending* |
 | 4 | Termination | hand-placed states give success / crash / drift / timeout correctly |
 | 5 | **Scripted oracle on true state** | lands across Table I at c = 1 (target ≥ 90% over 200 episodes). Also a random-policy reachability check. |
 | 6 | Sensor noise + domain randomisation | empirical statistics match §5 and §8 |
