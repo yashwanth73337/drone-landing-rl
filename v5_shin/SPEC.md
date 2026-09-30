@@ -450,6 +450,25 @@ Tests: `tests/test_block5_oracle.py`, 4/4. The oracle subset is 50 episodes at c
 | Critic | MLP on [u_t, s_rel] (13-D), non-recurrent, discarded at deployment | MLP 13 → 256 → 256 → 1 | [paper]; sizes [unspecified] |
 
 **Privilege boundary:** the actor forward pass receives only (I_t, u_t). A unit
+
+### Block 11 verified (30 Sep 2026), `policies/shin_policy.py`, `tests/test_block11_network.py`, 10/10 pass
+
+- **Parameters:** encoder 2,899,648 · LSTM 2,115,584 · estimation 659,712 · decision 100,996 · critic 69,633 · **total 5,845,577**.
+- **Dimensions:** LSTM in 519 / hidden 512; estimation 1031 → 512 → 256 (y_t); s̃ = y[0:6] (checked by hand recomputation); decision 263 → 256 → 128 → 4; critic 13 → 256 → 256 → 1. Critic inputs are divided by a fixed scale [5, 5, 5, 1, 1, 1, 1, 5, 5, 5, 5, 5, 5] [unspecified].
+- **Policy:** Gaussian with state-independent log σ (init −0.5); actions are clipped only in the env.
+- **Variant P actor:** MLP [s_rel, u] → 256 → 128 → 4, with no CNN, LSTM or estimate. Same critic.
+- **Privilege boundary (numerical):**
+  - Vision actor: outputs (μ, s̃) are bit-identical when critic, target and s_rel change, and change when the image changes.
+  - P actor: invariant to image, critic and target; changes with s_rel.
+  - Critic: reads only its own input.
+- **Recurrence:** step-by-step `act()` (rollouts) equals whole-sequence `evaluate()` (PPO update) in log-probs, values and estimates, across an episode boundary mid-sequence. The reset (h ← h·(1 − start)) isolates episodes exactly.
+- **Gradient routing:**
+  - L_est → encoder, LSTM and estimation only (not decision, critic or log σ).
+  - Policy loss → the whole actor, not the critic.
+  - Value loss → the critic only.
+  - This is what the paper's joint objective requires. Nothing else is being quietly trained by the wrong loss.
+- **Also tested:** no batch dependence; a real env step through the policy.
+
 test asserts that the actor output is invariant to s_rel.
 
 ### Block 7 verified (30 Sep 2026), `tests/test_block7_encoder.py`, 5/5 pass
@@ -526,7 +545,7 @@ r_active_t = −α · [β (L_est_t+1 − τ)]_0^1, with α = 0.1, β = 1.0, τ =
 | 8 | Obs/action interfaces | **DONE 30 Sep: 10/10** (§10), privilege boundary tested |
 | 9 | Reward | **DONE 30 Sep: 19/19** (§6); D3 → literal after the landscape |
 | 10 | Curriculum | **DONE 30 Sep: 9/9** (§7) |
-| 11 | Network | dims per §10 |
+| 11 | Network | **DONE 30 Sep: 10/10** (§10), 5.85M params |
 | 12 | PPO + L_est | smoke run (with your approval) |
 | 13 | r_active | hand-computed on a recorded rollout |
 | 14 | Evaluation script | reproduces the oracle's result |
