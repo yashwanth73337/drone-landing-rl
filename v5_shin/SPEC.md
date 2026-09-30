@@ -394,10 +394,21 @@ test asserts that the actor output is invariant to s_rel.
 |---|---|---|---|---|---|---|
 | CPU, tiny | 600 (480) | off | 480 | 0.999 / 0.995 / 0.999 | 0.78 / 0.56 / 0.83 | 0.59 m |
 | CPU, tiny | 1500 (1200) | on | 380 | — | 0.52 / 0.25 / −0.05 | 1.41 m |
+| **Desktop GPU, EGL** | 3000 (2400) | on | 1520 | 0.992 / 0.981 / 0.983 | **0.73 / 0.64 / 0.81** | **0.57 m** (p90 2.15 m) |
 
 Held-out accuracy is **data- and step-limited** (2.9M params), not a pipeline fault. The DR run underfits at 380 steps. A GPU run with more frames is logged when available.
 
 **Finding for Blocks 12–13.** While the privileged oracle flies (it ignores the camera), the pad centre is **out of the image in ~50% of visited frames** (0.455 and 0.496 in two runs). Over or past the pad, the 60°-pitched camera looks ahead of it. A single frame cannot locate an unseen pad: this is the regime the LSTM, L_est and r_active exist for.
+
+### Block 8 verified (30 Sep 2026), `envs/shin_env.py`, `tests/test_block8_env.py`, 10/10 pass
+
+- **Env:** gymnasium `ShinLandingEnv(mode='vision' | 'privileged')`, passing gymnasium's `check_env`. Every observation key is always present; **the actor's view is chosen by `ACTOR_KEYS`**: vision → (image, u); privileged (variant P) → (u, s_rel). `target` and `critic` are never actor inputs in vision mode.
+- **Observation:** image uint8 160×256; u = noisy [v_b, q] (7); critic = [u_clean, s_rel] (13); target = s_rel = [R^T(p_pad − p), R^T(v_pad − v)] (6), from the true state.
+- **Action:** clip(a, −1, 1) × [10, 10, 3, π/3] in the heading frame. Measured: 10.1 m/s forward after 1.5 s, world yaw rate −1.044 rad/s for −π/3.
+  - A full-rate turn at 10 m/s needs ~47° of bank, so the body-z rate is then cos(tilt) of the world yaw rate. That's physics, not a scaling bug.
+- **Privilege boundary (tested):** two envs that differ only in platform velocity give **identical** actor views (image, u) but different targets and critic inputs. The actor can infer platform motion only from images over time.
+- **Also tested:** noise is present in u and absent in the critic (σ ≈ 0.05 m/s); `terminated` vs `truncated` (timeout = truncated at 300 steps); one render per reset and per step in vision mode and none for P; seeded determinism; `AsyncVectorEnv` with spawn workers.
+- **Reward:** placeholder 0.0 until Block 9 (`reward_fn` hook).
 
 ## 11. Learning
 
@@ -442,7 +453,7 @@ r_active_t = −α · [β (L_est_t+1 − τ)]_0^1, with α = 0.1, β = 1.0, τ =
 | 5 | **Scripted oracle on true state** | **DONE 30 Sep: 99% at c = 1** (200 ep), random reachability OK (§9) |
 | 6 | Sensor noise + domain randomisation | **DONE 30 Sep: 17/17** (§8). Oracle under full DR 99% at c = 1 |
 | 7 | CNN perception (ArUco base) | **DONE 30 Sep: 5/5** (§10); probe data-limited as expected |
-| 8 | Obs/action interfaces | actor-invariance-to-s_rel test |
+| 8 | Obs/action interfaces | **DONE 30 Sep: 10/10** (§10), privilege boundary tested |
 | 9 | Reward | §6 test |
 | 10 | Curriculum | level logic on a synthetic success stream |
 | 11 | Network | dims per §10 |
