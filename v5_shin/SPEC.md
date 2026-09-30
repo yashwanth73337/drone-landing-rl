@@ -35,6 +35,7 @@ V5 does not import from or copy V1–V4 code (`src/envs`, `src/policies`,
 | D11 | Include the privileged-actor variant P (§11) | **ACCEPTED:** **Yes.** It is the control ceiling for the state-vs-control question. |
 | D12 | Initial drone yaw | **ACCEPTED:** Face the pad ± U(−15°, 15°); rejection-sample until the pad centre is in the image. |
 | D13 | Ground textures (Table II: 50 IDs) | **ACCEPTED:** 50 procedurally generated textures from a seeded script. |
+| D15 | Collision geometry / success region (§9, Block 4) | **OPEN**: see §9 |
 | D14 | Training seeds per configuration | **ACCEPTED:** 3 for configurations that are reported; 1 for exploratory runs. |
 
 ---
@@ -284,6 +285,21 @@ The 512-episode window also fixes the noisy 20-episode promotion problem (notes 
 | Platform yaw misalignment | U(−60°, 60°) | [paper] |
 | Estimator / LSTM state | zeros at reset | [unspecified] |
 
+### Block 4 verified (30 Sep 2026), `envs/landing_sim.py`, `tests/test_block4_termination.py`, 12/12 pass
+
+- **Termination:** checked after every physics substep (10 per policy step); the step ends at the first terminal substep.
+- **Outcomes:**
+  - `success`: any drone contact with the pad-top face (contact normal z ≥ 0.7).
+  - `crash_platform`: side-face contact.
+  - `crash_ground`.
+  - `tilt`: > 80°.
+  - `drift`: horizontal distance > 15 m, or > 12 m above the pad.
+  - `timeout`: 300 steps; a truncation, not a termination.
+- **Logged at every terminal step:** relative position (world and pad frame), relative velocity, tilt, and `com_over_pad`.
+- **Hand-built checks, all pass:** centre drop, side crash, lateral and vertical drift, tilt, timeout, step-after-done, and a velocity-matched descent onto a **6 m/s** platform (success, pad-frame error −0.085 / −0.051 m).
+- **Spawn (2000 resets, seed 20000):** 99.8% accepted on the first draw. KS passes for dx, dy, dz, ψ_0 and the D12 yaw offset. Pad-centre pixel row v spans 11–305 of 320 (median 190).
+- **D15 open, success region.** The LMF2 collision cube is 0.5 m, so pad-top contact is reachable with the CoM up to 0.75 + 0.25 = **1.0 m** from the pad centre, 0.25 m past the pad edge. Measured: CoM offset 0.97 m → `success` with `com_over_pad = False`; 1.03 m → `crash_ground`. The CoM sits 0.24 m above the pad at touchdown.
+
 ## 10. Network (Figs. 3, 4, p.5544)
 
 | Block | Paper | V5 (ArUco base) | Status |
@@ -337,7 +353,7 @@ r_active_t = −α · [β (L_est_t+1 − τ)]_0^1, with α = 0.1, β = 1.0, τ =
 | 1 | Physics + quad + controller | **DONE 30 Sep: 30/30** (§2.2) |
 | 2 | Platform motion | **DONE 30 Sep: 10/10** (§3) |
 | 3 | Camera + ArUco pad + EGL; **throughput benchmark** | **DONE 30 Sep: 18/18** (§4). Benchmark on the lab desktop: *pending* |
-| 4 | Termination | hand-placed states give success / crash / drift / timeout correctly |
+| 4 | Termination | **DONE 30 Sep: 12/12** (§9). D15 open |
 | 5 | **Scripted oracle on true state** | lands across Table I at c = 1 (target ≥ 90% over 200 episodes). Also a random-policy reachability check. |
 | 6 | Sensor noise + domain randomisation | empirical statistics match §5 and §8 |
 | 7 | CNN perception (ArUco base) | shapes, gradients, no ground truth in actor input |

@@ -20,6 +20,7 @@ BASE_INERTIA = np.array([0.013, 0.014, 0.013])  # kg m^2, base_link diag
 INERTIA = BASE_INERTIA + 4 * PROP_MASS * np.array(
     [PROP_XY**2, PROP_XY**2, 2 * PROP_XY**2])
 COLLISION_BOX = 0.5                            # m, cube edge (base_link collision)
+COLLISION_HALF = COLLISION_BOX / 2             # CoM height above a surface at rest
 
 # ---- Control allocation (lmf2_config.control_allocator_config) --------------
 # Rows: [Fz, tau_x, tau_y, tau_z]; columns: motors 0..3. The Fx, Fy rows are zero.

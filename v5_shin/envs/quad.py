@@ -60,8 +60,8 @@ class LMF2Quad:
         return dict(pos=np.array(pos), quat=np.array(quat), R=R,
                     v=np.array(v), w_body=R.T @ np.array(w))
 
-    def reset_pose(self, pos, yaw=0.0, v=(0, 0, 0), w_body=(0, 0, 0)):
-        quat = p.getQuaternionFromEuler([0, 0, yaw])
+    def reset_pose(self, pos, yaw=0.0, v=(0, 0, 0), w_body=(0, 0, 0), roll=0.0, pitch=0.0):
+        quat = p.getQuaternionFromEuler([roll, pitch, yaw])
         p.resetBasePositionAndOrientation(self.body, pos, quat, physicsClientId=self.cid)
         R = np.array(p.getMatrixFromQuaternion(quat)).reshape(3, 3)
         p.resetBaseVelocity(self.body, v, R @ np.asarray(w_body, float),
