@@ -8,6 +8,7 @@ Exactly one render per policy step (counted; the tests assert it).
 """
 import pkgutil
 
+import cv2
 import numpy as np
 import pybullet as p
 
@@ -65,14 +66,16 @@ class Camera:
         kw = {}
         if light_direction is not None:
             kw["lightDirection"] = list(light_direction)
+        # ER_NO_SEGMENTATION_MASK: segmentation is never used; skipping it
+        # cut render time 23% at 512x320 (measured, Block 3).
         _, _, rgba, _, _ = p.getCameraImage(
             self.w, self.h, view, self.proj, renderer=self._pflag,
-            physicsClientId=self.cid, **kw)
-        rgb = np.asarray(rgba, dtype=np.uint8).reshape(self.h, self.w, 4)[..., :3]
+            flags=p.ER_NO_SEGMENTATION_MASK, physicsClientId=self.cid, **kw)
+        rgba = np.asarray(rgba, dtype=np.uint8).reshape(self.h, self.w, 4)
         self.n_renders += 1
-        # ITU-R BT.601 luma, same weights as cv2.cvtColor(RGB2GRAY)
-        gray = rgb @ np.array([0.299, 0.587, 0.114])
-        return np.clip(np.rint(gray), 0, 255).astype(np.uint8)
+        # BT.601 luma via OpenCV fixed-point: 0.17 ms vs 2.9 ms for the float
+        # matmul at 512x320; differs by at most 1 grey level.
+        return cv2.cvtColor(rgba, cv2.COLOR_RGBA2GRAY)
 
     def project(self, pts_world, R, pos):
         """Analytic pinhole projection -> (N, 2) pixels (u right, v down) and depth."""

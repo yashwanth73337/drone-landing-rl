@@ -112,7 +112,8 @@ def main():
     os.makedirs(out, exist_ok=True)
     cfg = dict(vars(a), host=pyplatform.node(), cpu_count=os.cpu_count(),
                python=pyplatform.python_version(), numpy=np.__version__,
-               cv2=cv2.__version__, torch=tv, pybullet_api=pybullet.getAPIVersion(), gpu=gpu)
+               cv2=cv2.__version__, torch=tv, pybullet_api=pybullet.getAPIVersion(),
+               pybullet_numpy=bool(pybullet.isNumpyEnabled()), gpu=gpu)
     with open(os.path.join(out, "config.json"), "w") as f:
         json.dump(cfg, f, indent=2)
 

@@ -1,0 +1,25 @@
+{
+  "renderers": [
+    "egl"
+  ],
+  "res": [
+    "512x320",
+    "512x320->256x160",
+    "256x160"
+  ],
+  "envs": [
+    8,
+    16
+  ],
+  "steps": 300,
+  "out": null,
+  "host": "Yashwanth",
+  "cpu_count": 20,
+  "python": "3.12.13",
+  "numpy": "2.5.2",
+  "cv2": "5.0.0",
+  "torch": "2.13.0+cu130",
+  "pybullet_api": 202010061,
+  "pybullet_numpy": false,
+  "gpu": "NVIDIA T400 4GB"
+}
