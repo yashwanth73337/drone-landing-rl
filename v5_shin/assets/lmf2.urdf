@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<!-- V5 LMF2 quad. Mass/inertia/collision copied from AerialGym
+     resources/robots/lmf2/model.urdf. Visual geometry is simplified.
+     Must stay consistent with envs/lmf2_params.py (checked by the tests). -->
+<robot name="lmf2">
+  <link name="base_link">
+    <inertial>
+      <origin xyz="0 0 0"/>
+      <mass value="1.2"/>
+      <inertia ixx="0.013" ixy="0" ixz="0" iyy="0.014" iyz="0" izz="0.013"/>
+    </inertial>
+    <visual><geometry><box size="0.25 0.25 0.06"/></geometry></visual>
+    <collision><geometry><box size="0.5 0.5 0.5"/></geometry></collision>
+  </link>
+  <link name="prop_fl"><inertial><mass value="0.01"/><inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/></inertial></link>
+  <link name="prop_fr"><inertial><mass value="0.01"/><inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/></inertial></link>
+  <link name="prop_br"><inertial><mass value="0.01"/><inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/></inertial></link>
+  <link name="prop_bl"><inertial><mass value="0.01"/><inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/></inertial></link>
+  <joint name="j_fl" type="fixed"><parent link="base_link"/><child link="prop_fl"/><origin xyz="0.100 0.100 0"/></joint>
+  <joint name="j_fr" type="fixed"><parent link="base_link"/><child link="prop_fr"/><origin xyz="0.100 -0.100 0"/></joint>
+  <joint name="j_br" type="fixed"><parent link="base_link"/><child link="prop_br"/><origin xyz="-0.100 -0.100 0"/></joint>
+  <joint name="j_bl" type="fixed"><parent link="base_link"/><child link="prop_bl"/><origin xyz="-0.100 0.100 0"/></joint>
+</robot>

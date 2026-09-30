@@ -1,0 +1,370 @@
+# V5 — Faithful reimplementation of Shin et al. (RA-L 2026): SPEC
+
+**Status:** decisions made 30 Sep 2026 (§0). Block 1 built and verified (§12).
+**Reference:** W. Shin et al., "Vision-Based Autonomous Drone Landing on Moving
+Platforms With Uncertain Motion via DRL", IEEE RA-L 11(5), pp. 5542–5549, May 2026.
+Page numbers below are journal pages (5542–5549).
+**Perception reference:** T. Park et al., "PACMAN", Image Vis. Comput. 165 (2026) 105821.
+
+Status tags:
+- **[paper]**: stated in the paper, value quoted
+- **[inferred]**: read off a figure or deduced; the source is given
+- **[unspecified]**: the paper is silent; a value is proposed here and **you decide**
+- **[deviation]**: we cannot match the paper; the reason is given
+- **[ambiguous]**: the paper states it, but it can be read more than one way
+
+V5 does not import from or copy V1–V4 code (`src/envs`, `src/policies`,
+`train_shin_v4.py`). Lessons are carried over as written notes only.
+
+---
+
+## 0. Decisions (made 30 Sep 2026)
+
+| ID | Question | Decision |
+|---|---|---|
+| D1 | Env base: gym-pybullet-drones `BaseAviary`, or our own gymnasium env on raw PyBullet? | **DECIDED: raw PyBullet, own env.** BaseAviary calls `_computeReward()` before `_computeTerminated()` (notes §10), is CF2X-centric, and bundles DSLPIDControl. We still use PyBullet (the decided simulator) but none of its drone scaffolding. |
+| D2 | Quad model | **DECIDED: AerialGym LMF2 (1.24 kg).** The Table II gains are exactly AerialGym's `lmf2_controller_config.py`, so LMF2 is the airframe the paper's controller was tuned for [inferred]. The lab quad matters only for Semester-2 sim-to-real. |
+| D3 | Vertical-speed-penalty sign (§6) | **DECIDED: prose meaning**: penalise descent faster than 0.5 m/s. The literal form is kept as config `vz_penalty='literal'` for a later check (see §6 risk note). |
+| D4 | Δz sign convention (§6) | **ACCEPTED: Δz = z_pad_top − z_drone** (negative while above), so "undershoot" = below the pad top. |
+| D5 | Curriculum rule (§7) | **ACCEPTED:** Levels 10, 20, …, 80; c = level/80; promote at ≥80% success over each 512-episode window; no demotion. |
+| D6 | Clip on platform speed and yaw-rate random walk (§3) | **ACCEPTED:** v ∈ [0, 8c] m/s, \|ω\| ≤ 30°/s |
+| D7 | Table II external torque "±4e3 N·m" | **ACCEPTED:** Treat as a typo for **±4e-3 N·m**. |
+| D8 | PPO implementation | **ACCEPTED:** **Own compact recurrent PPO in PyTorch** (cleanRL-style). The auxiliary loss inside the objective, the asymmetric critic, and reward injection before GAE are all awkward in SB3/sb3-contrib. |
+| D9 | CNN input resolution | **ACCEPTED:** Render at 512×320 [paper]; downsample to **256×160** for the CNN. Final choice after the throughput benchmark. |
+| D10 | Auxiliary-loss weight λ_est | **ACCEPTED:** 1.0 |
+| D11 | Include the privileged-actor variant P (§11) | **ACCEPTED:** **Yes.** It is the control ceiling for the state-vs-control question. |
+| D12 | Initial drone yaw | **ACCEPTED:** Face the pad ± U(−15°, 15°); rejection-sample until the pad centre is in the image. |
+| D13 | Ground textures (Table II: 50 IDs) | **ACCEPTED:** 50 procedurally generated textures from a seeded script. |
+| D14 | Training seeds per configuration | **ACCEPTED:** 3 for configurations that are reported; 1 for exploratory runs. |
+
+---
+
+## 1. Simulator and timing
+
+| Item | Paper | V5 | Status |
+|---|---|---|---|
+| Simulator | AerialGym (Isaac Gym) [25], p.5546 §IV-A | PyBullet 3.2.7 | [deviation]: decided; lab desktop, no Isaac Gym |
+| Env wrapper | — | own gymnasium env (D1) | [unspecified] |
+| Policy / control step Δt | 0.1 s (10 Hz), p.5543 §II-B and p.5546 | 0.1 s | [paper] |
+| Episode horizon | 300 steps = 30 s, p.5546 | 300 | [paper] |
+| Physics rate | not stated | **100 Hz** (10 substeps per action) | [inferred] AerialGym `base_sim_config.dt = 0.01` |
+| Low-level controller rate | sim: not stated. Real: geometric controller 50 Hz, PX4 250 Hz (Fig. 10a, p.5548) | 100 Hz (every physics step, as in AerialGym) | [inferred] |
+| Parallel envs | "multiple environments … in parallel", p.5546 | SubprocVecEnv, 16 envs (desktop has 20 threads) | [unspecified] |
+| Rendering | GPU (Isaac) | PyBullet EGL plugin, one render per policy step (10 Hz), not per physics step | [deviation]: throughput |
+| Training budget | Fig. 5 x-axis up to ~125k **episodes**; proposed method ~95% by ~20k episodes; "converges within approximately 3.5 hours" on an RTX 4090, p.5546 | report ours in episodes **and** env steps | [paper]/[inferred]. Env steps not stated; upper bound ≈ 125k × 300 = 37.5M |
+
+**Throughput gate (before any training run):** `scripts/bench_env.py` measures
+steps/s for {1, 8, 16} envs × {EGL on, off} × {512×320, 256×160}, with the
+render count per step asserted to be 1. The achieved budget is reported as a
+fraction of the paper's episodes.
+
+## 2. Vehicle and controller
+
+Source for everything marked [AG]: AerialGym (github.com/ntnu-arl/aerial_gym_simulator),
+files `config/robot_config/lmf2_config.py`, `config/controller_config/lmf2_controller_config.py`,
+`resources/robots/lmf2/model.urdf`, `control/controllers/{base_lee_controller,velocity_control}.py`,
+`control/motor_model.py`, `config/sim_config/base_sim_config.py`. Values are copied into
+`envs/lmf2_params.py`; no AerialGym code is imported.
+
+### 2.1 Quadrotor (D2: LMF2)
+
+| Item | V5 value | Status |
+|---|---|---|
+| Airframe | AerialGym LMF2: Table II gains = `lmf2_controller_config` exactly | [inferred] [AG] |
+| Mass | 1.2 kg base + 4 × 0.01 kg props = **1.24 kg** | [AG] |
+| Inertia | base diag(0.013, 0.014, 0.013) + props at (±0.1, ±0.1, 0) → diag(0.0134, 0.0144, 0.0138) kg·m² | [AG] |
+| Collision | 0.5 m cube (drives touchdown geometry: bottom face 0.25 m below the CoM) | [AG] |
+| Allocation | rows [Fz, τx, τy, τz]: τ arms ±0.13 m, thrust-to-torque ratio 0.07 | [AG] |
+| Motor thrust | per motor [0.1, 10] N → thrust/weight 3.29 | [AG] |
+| Motor model | first-order in √thrust (rpm) space, discrete factor dt/(dt+τ); τ_up ~ U(0.05, 0.08) s per motor, τ_down = 0.005 s; thrust constant cancels | [AG] |
+| Damping | linear and angular rigid-body damping 0.01 | [AG] |
+| Aero drag | none (LMF2 damping coefficients are all 0) | [AG] |
+| PyBullet load flags | `URDF_MERGE_FIXED_LINKS \| URDF_USE_INERTIA_FROM_FILE`. **Without the second flag PyBullet computes inertia from the collision box (0.052 kg·m², ~4× too large). Found by the Block 1 test.** | ours |
+
+### 2.2 Controller
+
+| Item | Paper | V5 | Status |
+|---|---|---|---|
+| Type | Lee geometric controller [26], body-frame velocity + yaw-rate commands (p.5546) | numpy port of AerialGym `LeeVelocityController` | [paper] + [AG] |
+| K_v (x, y, z) | U(2.7, 3.3), U(2.7, 3.3), U(1.3, 1.7) (Table II) | each component sampled independently | [paper] |
+| K_θ (roll, pitch, yaw) | U(1.6, 1.85), U(1.6, 1.85), U(0.25, 0.4) (Table II) | same | [paper] |
+| K_ω (roll, pitch, yaw) | not stated | U(0.4, 0.5), U(0.4, 0.5), U(0.075, 0.09) | [AG] |
+| Gain scaling | not stated | velocity loop mass-scaled: F = m(K_v e_v − g). Attitude loop outputs **raw torque**: τ = −K_θ e_R − K_ω e_ω + ω×Jω (not inertia-scaled, so the gains are tied to the LMF2 inertia). *Corrects the earlier draft, which guessed inertia scaling.* | [AG] |
+| Command frame | "heading frame" (p.5543) | vehicle frame = yaw-only rotation, rotated to world inside the controller | [paper] + [AG] |
+| Yaw | yaw-rate command | desired attitude uses the **current** yaw (no yaw-angle hold); desired body rate from the euler yaw rate; \|ω_z\| clamped to π/3 rad/s | [AG] |
+| Tilt limit | not stated | none (`max_inclination_angle_rad` is defined in the config but unused by the velocity controller) | [AG] |
+| Gain sampling time | "Env. init" (Table II) | once per environment instance. AerialGym code re-samples on each reset when `randomize_params=True`; **the paper's table wins** | [paper] |
+
+**Block 1 verified (30 Sep 2026), `tests/test_block1_controller.py`, 30/30 pass:**
+
+| Check | Result |
+|---|---|
+| Mass / inertia loaded | 1.24 kg; inertia within 0.3% (merge re-diagonalises) |
+| Hover 5 s, gains at nominal / min / max | drift 0.000 m, tilt 0.000° |
+| Lateral 2 m/s step | t50 0.39–0.43 s (ideal first-order 0.21–0.26 s), overshoot 8–14%, steady-state error ≤ 1.1%, cross-axis ≤ 0.01 m/s |
+| Vertical ±1 m/s step | t50 0.38–0.59 s (ideal 0.41–0.53 s), overshoot 0%, steady-state error ≤ 1.5% |
+| Heading frame at yaw 90° | world velocity matches the heading-frame command within 0.04 m/s |
+| Yaw rate 0.5 rad/s and 2.0 rad/s | 0.4986–0.4989 rad/s; 2.0 is clamped to 1.043 against π/3 = 1.047 |
+| Chase: 10 m/s command | 9.5 m/s reached in 1.01 s, altitude loss 0.018 m, no motor saturation |
+
+Dynamics notes for later blocks:
+- **The attitude loop is slow.** Its dominant pole is about 0.23 s, so lateral velocity overshoots 8–14%.
+- **Motors spin down in 5 ms but up in 50–80 ms.** So descent reacts slightly faster than ideal and climb slower.
+- **Yaw drifts a few degrees during manoeuvres,** because there is no yaw-angle hold.
+
+The test criteria were revised once, with the reasons recorded in the test docstring. The first version compared the 10–90% rise with first-order theory, which is the wrong model for a lagged, S-shaped response.
+
+## 3. Landing platform
+
+| Item | Paper | V5 | Status |
+|---|---|---|---|
+| Motion | planar; forward speed and yaw rate random walk: v_{t+1} = v_t + δv, ω_{t+1} = ω_t + δω, applied each 0.1 s step (p.5543 §II-B) | unicycle kinematics, integrated at physics rate, perturbed at 10 Hz | [paper] |
+| v_0 | U(0, 8) m/s (Table I, p.5544) | U(0, 8c) | [paper]; c scaling [unspecified] (§7) |
+| ω_0 | 0°/s (Table I) | 0 | [paper] |
+| δv | U(−0.5, 0.5) m/s per step (Table I) | U(−0.5c, 0.5c) | [paper]; c scaling [unspecified] |
+| δω | U(−3, 3)°/s per step (Table I) | U(−3c, 3c)°/s | [paper]; c scaling [unspecified] |
+| Speed / yaw-rate bounds | not stated; the walk is unbounded (after 300 steps, speed SD ≈ 5 m/s) | v ∈ [0, 8c], \|ω\| ≤ 30°/s (D6) | [unspecified] |
+| Initial platform yaw misalignment ψ_0 | U(−60°, 60°) (Table I) | angle between platform heading and drone heading | [paper]; reference frame [ambiguous] |
+| Vehicle body | ground vehicle (golf cart in the real test, Fig. 10a) | box 1.5 × 1.5 × 1.0 m, kinematic (mass 0, pose reset every physics step) | [unspecified] |
+| Pad | 1.5 × 1.5 m (p.5546) | top face of the box | [paper] |
+| Pad top height | Fig. 9 z-plots show the platform at ≈1 m | 1.0 m | [inferred] Fig. 9, p.5548 |
+| Vertical heave | only in the "Boat" evaluation (Fig. 9, Table V) | off in training | [paper] |
+
+**Test:** 10k simulated episodes; empirical δv and δω histograms match U(·), and the clip-hit rate is logged.
+
+## 4. Pad marking (visual target)
+
+| Item | Paper | V5 | Status |
+|---|---|---|---|
+| Main method | PACMAN hexagonal keypoint pad [17] with frozen keypoint encoder (Fig. 3) | **later, as a single change** | [paper] |
+| Ablation "w/o keypoint encoder" | pad replaced by ArUco [19]; policy uses a "standard CNN trained end-to-end" (p.5546 §IV-B) | **V5 base configuration** | [paper] |
+| ArUco dictionary / id / size | not stated | DICT_4X4_50, id 0, outer black square 1.5 m (fills the pad), white border | [unspecified] |
+| ArUco usage | image → CNN. **No detection, no PnP.** | same. OpenCV ArUco appears only in the EKF+RL baseline (§11). | [paper] |
+| PACMAN weights | README says a pretrained detector is provided, but the link is a blank "(See)". The repo has C++/TensorRT inference only: no weights, no training code. It expects `pacman_fpn202506_1240_1624_int8.engine`. MIT licence. | requested from the authors (PyTorch checkpoint). Fallback: train our own from sim-projected keypoint labels using the Park et al. recipe (their Table 1, Eqs. 1–5). | [deviation] pending |
+
+## 5. Sensors, observation, action
+
+| Item | Paper | V5 | Status |
+|---|---|---|---|
+| Camera | grayscale pinhole, 512×320, 90° **horizontal** FOV (p.5546) → VFOV ≈ 64.0° | same | [paper] |
+| Camera mount | "60° downward pitch to the forward axis" (p.5543) | optical axis 60° below body +x (30° from nadir), at body origin | [paper]; offset [unspecified] |
+| CNN input | not stated | 256×160 (D9), pixel values / 255 | [unspecified] |
+| Velocity sensor | body-frame velocity + 0.05 m/s Gaussian noise (p.5546) | N(0, 0.05²) per axis, every step | [paper]; per-axis σ [inferred] |
+| Attitude sensor | quaternion + 0.5° small-angle noise (p.5546) | small rotation, axis-angle components ~ N(0, (0.5°)²), composed with the true attitude | [paper]; model [inferred] |
+| Actor obs | o_t = (I_t, u_t), u_t = [v_b ∈ R³, q ∈ R⁴] (p.5543) | same; u_t noisy | [paper] |
+| Critic obs | o_priv = [u_t, s_rel_t] (p.5545 §III-D1) | 13-D; u_t **clean** | [paper]; clean-vs-noisy [unspecified] |
+| Estimation target | s_rel = [Δx_b, Δv_b] ∈ R⁶: platform position and velocity relative to the drone, **in the body frame** (p.5544) | Δx = p_pad − p_drone; Δv = v_pad − v_drone; both rotated into the body frame | [paper]; difference direction [inferred] |
+| Action | a_t = [v_x, v_y, v_z, ω_z] velocity commands in the drone's **heading frame** (yaw-only rotated) (p.5543) | same | [paper] |
+| Action limits | not stated | v_xy ±10 m/s, v_z ±3 m/s, ω_z ±π/3 rad/s (= the controller clamp [AG]); policy output clipped to [−1, 1] then scaled | [unspecified] |
+
+Note on exploration: V4's white-noise failure came from position-offset actions
+that did not accumulate (notes §5). Velocity commands held for 0.1 s do integrate
+into position, so Gaussian PPO noise should give net motion. The oracle/random
+reachability test (§12) checks this before any RL.
+
+## 6. Reward
+
+Final step reward (p.5545 §III-D4):
+
+```
+r_t = +10                          successful landing
+      -10                          crash or excessive drift
+      r_shaping_t + r_active_t     otherwise
+```
+
+Shaping terms, r_shaping = Σ w_i r_i (Table III, p.5545), where [x]_a^b = clip(x, a, b):
+
+| Term | Equation (as printed) | w_i | Status |
+|---|---|---|---|
+| Lateral progress | [d_xy,t−1 − d_xy,t]_{−1}^{1} | 1.0 | [paper]; d_xy = horizontal drone–pad-centre distance |
+| Vertical progress | [\|Δz_t−1\| − \|Δz_t\|]_{−1}^{1} / max(d_xy,t, 1) | 1.0 | [paper] |
+| Vertical speed penalty | −[v_z + 0.5]_0^∞ as printed. **V5 (D3): −[−v_z − 0.5]_0^∞** (z up) | 0.5 | [deviation from the literal equation]: follows the prose |
+| Undershoot penalty | −𝟙[Δz_t > 0] Δz_t | 1.0 | **[ambiguous] D4** |
+| Yaw-rate penalty | −\|ω_z\| | 2.0 | [paper]; ω_z = commanded, in rad/s [unspecified] |
+
+**D3, vertical speed (decided: prose meaning).** V5 penalises descent faster than
+0.5 m/s: −0.5·max(0, −v_z − 0.5). The printed equation −[v_z + 0.5]⁺ would instead
+penalise every v_z > −0.5 m/s, including hovering (0.25 per step).
+
+**Risk to watch.** With the prose version, a drone hovering at the start has lateral
+progress 0, vertical progress 0, and no penalty, so it gets exactly 0 per step. The
+only way to lose reward is to crash (−10). That is the same stall optimum found in
+Strand B (notes §10: "hovering became the value-maximising policy"). The yaw
+penalty and r_active do not change this. If variant P (privileged actor) hovers,
+the first thing to test is `vz_penalty='literal'`, as a single change.
+
+**D4, Δz sign.** Table I gives the altitude offset Δz_0 ∈ U(2, 8) m as positive,
+but "undershoot" only makes sense if Δz > 0 means the drone is below the pad
+top. Proposal: Δz = z_pad_top − z_drone. |Δz| terms are unaffected.
+
+Terminal and edge cases:
+
+| Item | Paper | V5 | Status |
+|---|---|---|---|
+| Success | "contact with the pad upper surface" (p.5546) | contact between the drone and the pad-top face, drone CoM above the pad top. No speed or attitude condition (faithful); touchdown relative speed and tilt are **logged**. | [paper] |
+| Crash | not defined | contact with the ground or a platform side face; tilt > 80° | [unspecified] |
+| Excessive drift / workspace exit | not defined | d_xy > 15 m, or drone more than 12 m above the pad top | [unspecified] |
+| Timeout at 300 steps | no terminal reward stated | shaping only; treated as truncation (bootstrap from V(s)) | [unspecified] |
+| Terminal step | ±10 **replaces** the shaping on that step | same | [paper] |
+
+**Test:** reward on hand-built states matches hand calculation for every term and every branch (`tests/test_reward.py`).
+
+## 7. Curriculum
+
+| Item | Paper | V5 | Status |
+|---|---|---|---|
+| Scalar | c ∈ [0, 1] scales platform motion; c = 1 is the full task (p.5545 §III-D2) | same | [paper] |
+| Levels | Fig. 3: "Level 10 → … → Level 80, level updated every 512 episodes" | levels 10, 20, …, 80 (8 levels), c = level/80 | [inferred] (D5) |
+| What c scales | "platform motion … faster motion and stronger perturbations" | v_0 max, δv, δω (and the D6 clips). Spawn geometry is **not** scaled. | [unspecified] |
+| Update rule | every 512 episodes; criterion not stated | after each 512 completed episodes (pooled over envs): promote if success ≥ 80%; no demotion | [unspecified] |
+
+Why step-by-10: Fig. 5 marks "max level reached" at ≈8k–12k episodes. With
+single-step levels, 70 promotions × 512 = 35,840 episodes minimum, which
+contradicts the figure. Steps of 10 need 7 × 512 = 3,584 minimum, which is
+consistent with it.
+
+The 512-episode window also fixes the noisy 20-episode promotion problem (notes §7).
+
+## 8. Domain randomisation (Table II, p.5545)
+
+| Parameter | Range | When | Status |
+|---|---|---|---|
+| Control gains | §2.2 | env init | [paper] |
+| External force F_x,y,z | U(−0.75, 0.75) N | each step | [paper]; "step" = policy step (held for 0.1 s) [unspecified] |
+| External torque M_x,y,z | U(−4e-3, 4e-3) N·m | each step | [deviation]: printed as ±4e3 (D7) |
+| Initial velocity v_0 | U(−1, 1) m/s per axis | episode start | [paper] |
+| Initial angular rate ω_0 | U(−10, 10) °/s per axis | episode start | [paper] |
+| Ground texture ID | 1…50 | episode start | [paper]; the textures themselves are [deviation] (D13) |
+| Ground texture scale s | U(0.4, 1.2) | episode start | [paper] |
+| Ground brightness I | U(0.5, 1.0) | episode start | [paper] |
+| RGB scaling c_R,G,B | U(0.5, 1.0) | episode start | [paper]; applied before the grayscale conversion |
+| Light direction φ | U(45°, 135°) | episode start | [paper]; PyBullet `lightDirection` elevation |
+
+## 9. Initial conditions (Table I, p.5544)
+
+| Item | Value | Status |
+|---|---|---|
+| Altitude offset Δz_0 | U(2, 8) m above the pad top | [paper] |
+| Lateral offset (Δx_0, Δy_0) | U(−3, 3) m each | [paper] |
+| Platform in FOV at t = 0 | required (p.5543 §II-A) | [paper]; enforced by D12 rejection sampling |
+| Platform yaw misalignment | U(−60°, 60°) | [paper] |
+| Estimator / LSTM state | zeros at reset | [unspecified] |
+
+## 10. Network (Figs. 3, 4, p.5544)
+
+| Block | Paper | V5 (ArUco base) | Status |
+|---|---|---|---|
+| Visual encoder | frozen keypoint encoder + trainable CNN → l_t ∈ R^512 | trainable CNN, 5 conv layers (stride 2; channels 32, 64, 64, 128, 128), ELU → Linear → l_t ∈ R^512 | [paper] dim; architecture [unspecified] |
+| Memory layer | LSTM; input [l_t, u_t]; h_t ∈ R^512 | 1-layer LSTM, hidden 512 | [paper]; layers [unspecified] |
+| State-estimation layer | MLP on [l_t, h_t, u_t] → y_t ∈ R^256 (N = 256) | MLP 1031 → 512 → 256, ELU, linear output | [paper] dims; hidden [unspecified] |
+| Estimate | s̃_rel = y_t[0:6] | same | [paper] |
+| Decision layer | MLP on [y_t, u_t] → a_t | MLP 263 → 256 → 128 → 4 (Gaussian mean); state-independent log σ, init −0.5 | [paper] inputs; sizes [unspecified] |
+| Critic | MLP on [u_t, s_rel] (13-D), non-recurrent, discarded at deployment | MLP 13 → 256 → 256 → 1 | [paper]; sizes [unspecified] |
+
+**Privilege boundary:** the actor forward pass receives only (I_t, u_t). A unit
+test asserts that the actor output is invariant to s_rel.
+
+## 11. Learning
+
+### 11.1 PPO (all [unspecified]; D8)
+
+| Hyperparameter | Proposal |
+|---|---|
+| Implementation | own recurrent PPO (PyTorch), single optimiser, actor and critic separate |
+| n_envs × rollout | 16 × 256 = 4096 steps per update |
+| BPTT | sequences of 32 steps with stored initial (h, c); hidden state reset at episode start |
+| Epochs / minibatches | 5 / 4 |
+| γ / λ | 0.99 / 0.95 |
+| Clip ε | 0.2 (no value clipping) |
+| LR | 3e-4 Adam, linear decay |
+| Entropy coefficient | 0.0 |
+| Max grad norm | 1.0 |
+| Value loss coefficient | 0.5 |
+| Reward / obs normalisation | none (±10 terminals are designed to dominate) |
+
+### 11.2 Auxiliary estimation loss (Eq. 1, p.5545)
+
+L_est_t = (1/6) Σ_i (s_rel_t,i − s̃_rel_t,i)², raw units (m, m/s), minimised
+jointly with the PPO loss on the same minibatches [paper]. Total loss =
+L_PPO + λ_est · L_est, with λ_est = 1.0 [unspecified] (D10).
+
+### 11.3 Active-perception reward (p.5545 §III-C)
+
+r_active_t = −α · [β (L_est_t+1 − τ)]_0^1, with α = 0.1, β = 1.0, τ = 0.01 [paper].
+
+- **Computation:** after the rollout, using the estimate recorded at t+1 during collection (detached), added to r_t before GAE. On terminal or truncated steps there is no t+1, so r_active = 0 [unspecified].
+- **Watch item (not pre-fixed):** V4 fell below τ by 50k steps and the term went inert for 92% of training (notes §9 #6). Log the fraction of steps with L_est_t+1 > τ on every update.
+- **Scale note:** the paper's Table IV RMSEs (0.47 m, 0.59 m/s) imply L_est ≈ 0.28 ≫ τ, so the term should be active in this task's scale (2–8 m altitude). V4's estimator ran at a much smaller error scale.
+
+## 12. Build and verification order (tests in `v5_shin/tests/`)
+
+| # | Component | Pass criterion |
+|---|---|---|
+| 1 | Physics + quad + controller | **DONE 30 Sep: 30/30** (§2.2) |
+| 2 | Platform motion | §3 test |
+| 3 | Camera + ArUco pad + EGL; **throughput benchmark** | pad centre projects to the analytically predicted pixel ±2 px; bench table logged |
+| 4 | Termination | hand-placed states give success / crash / drift / timeout correctly |
+| 5 | **Scripted oracle on true state** | lands across Table I at c = 1 (target ≥ 90% over 200 episodes). Also a random-policy reachability check. |
+| 6 | Sensor noise + domain randomisation | empirical statistics match §5 and §8 |
+| 7 | CNN perception (ArUco base) | shapes, gradients, no ground truth in actor input |
+| 8 | Obs/action interfaces | actor-invariance-to-s_rel test |
+| 9 | Reward | §6 test |
+| 10 | Curriculum | level logic on a synthetic success stream |
+| 11 | Network | dims per §10 |
+| 12 | PPO + L_est | smoke run (with your approval) |
+| 13 | r_active | hand-computed on a recorded rollout |
+| 14 | Evaluation script | reproduces the oracle's result |
+| 15 | PACMAN keypoint pad | single change, after the above |
+
+## 13. Evaluation protocol
+
+| Item | Paper | V5 | Status |
+|---|---|---|---|
+| Training-scenario evaluation | 10,000 episodes, c = 1, random-walk platform (p.5546 §V-A) | 10,000 episodes, seed base **9000** | [paper] |
+| Metrics | success rate, position RMSE (m), velocity RMSE (m/s) (Table IV) | same, **plus** failure breakdown (success / ground crash / platform-side crash / drift / tilt / timeout), touchdown speed, blind fraction, longest blind run | [paper] + ours |
+| RMSE frames | not stated | reported over all frames **and** per blind-age bin (visible, 1–15, 16–60, 61–120, >120 steps). This is the notes §9 #2 lesson: a visible-only error cannot see where crashes originate. | [unspecified] |
+| Diverse dynamics (Table V, Fig. 9) | 1,000 episodes each: 8 m/s straight (98.8%), sinusoidal linear acceleration (79.1%), circle (79.6%), zigzag (69.7%), U-turn (55.0%), boat heave (99.5%) | parameters read off Fig. 9; lower priority | [paper] rates; parameters [inferred] |
+| Promotion evaluation | — | seed base **10000** | ours |
+| Perception diagnostics | — | seed base **20000** | ours |
+
+Every number is reported with its checkpoint file, timestep, and task (c, spawn ranges).
+
+### Configurations and paper targets (Table IV, p.5546)
+
+| ID | Configuration | Paper success | Paper pos / vel RMSE |
+|---|---|---|---|
+| **A** | ArUco + CNN + LSTM + L_est + r_active (**V5 base**) = paper "w/o keypoint encoder" | 91% | 0.953 m / 1.063 m/s |
+| A-noAP | A without r_active | — (the paper's 91% was measured on the keypoint base) | — |
+| A-noEst | A without L_est and r_active, LSTM kept = paper "w/o state estimation" | 73% (keypoint base) | — |
+| H | EKF+RL: ArUco detector + solvePnP (**written fresh**) → constant-velocity EKF → [pos, vel, diag cov] + u_t → MLP policy | 59% | 1.331 / 1.501 |
+| **P** | **Privileged actor:** actor gets [u_t, s_rel] (true); same PPO, reward (no r_active), curriculum | — (ours) | — |
+| K | Full proposed: keypoint pad + frozen PACMAN encoder | 97% | 0.474 / 0.589 |
+
+Only A (and later K) is directly comparable to a paper number. The other
+ablations are run on the ArUco base, so they are compared by gap and direction,
+then repeated on K.
+
+### State vs control reading (supervisor's question)
+
+- **P fails:** control/training problem. Perfect information does not land, in this task.
+- **P lands, A does not:** state problem.
+- **A vs A-noEst:** what the learned estimator adds.
+- **A vs H:** learned vs model-based estimation.
+
+## 14. Repository
+
+```
+v5_shin/
+  SPEC.md
+  envs/  policies/  scripts/  tests/  assets/   (URDFs, ArUco texture, generated ground textures)
+  runs/<run_name>/   config.json, CSVs (tracked); *.zip *.pt *.pth *.pkl (ignored)
+```
+
+`.gitignore` additions (anchored at the repo root):
+
+```
+/v5_shin/runs/**/*.zip
+/v5_shin/runs/**/*.pt
+/v5_shin/runs/**/*.pth
+/v5_shin/runs/**/*.pkl
+```

@@ -15,3 +15,9 @@ results_recurrent/
 *.pkl
 *.pre_*
 tb/
+
+# V5 checkpoints (anchored; see PROJECT_NOTES §14)
+/v5_shin/runs/**/*.zip
+/v5_shin/runs/**/*.pt
+/v5_shin/runs/**/*.pth
+/v5_shin/runs/**/*.pkl
