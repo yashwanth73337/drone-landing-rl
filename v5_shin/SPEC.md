@@ -517,6 +517,26 @@ Held-out accuracy is **data- and step-limited** (2.9M params), not a pipeline fa
 | Value loss coefficient | 0.5 |
 | Reward / obs normalisation | none (±10 terminals are designed to dominate) |
 
+### Block 12 built (30 Sep 2026): `policies/ppo.py`, `scripts/train_ppo.py`, `tests/test_block12_ppo.py`, 10/10 pass (CPU; no training run yet)
+
+- **Vector env:** gymnasium `AsyncVectorEnv` (spawn) with **SAME_STEP autoreset**. The final observation and final info are read from `info['final_obs'] / info['final_info']`.
+- **Rollout:** the LSTM (h, c) is stored at every 32-step chunk start; `starts` masks reset it.
+- **Timeouts are bootstrapped:** next_value = V(final_obs.critic). Terminal steps: 0. The GAE chain is cut at every done.
+  - **Tested:** a hand-computed GAE with a truncation and a termination. With the horizon forced to 5, every truncated step's next_value is V(final obs), not the reset obs' value.
+- **Update:** loss = L_clip + 0.5·mean((V − R)²) − 0·H + λ_est·L_est, where L_est = mean (s̃ − s_rel)² [paper Eq. 1].
+  - Per-minibatch advantage normalisation [unspecified; cleanRL default], Adam eps 1e-5, linear LR decay, grad-norm clip 1.0.
+  - Variant P: λ_est = 0 (no estimator).
+- **Gradient accumulation:** a minibatch of 128 chunks × 32 steps = 4096/4 = 1024 frames can be split into micro-batches with one optimizer step. **The parameters after one step are identical to the unsplit update (tested).** This is needed on the 4 GB T400: the CNN activations for 1024 frames are about 4.5 GB. Default for vision on GPU: 8 chunks (256 frames) per micro-batch. `scripts/gpu_update_check.py` measures the peak memory.
+- **Recurrence correctness (tested):** re-evaluating a real rollout in chunks, from the stored states, reproduces the rollout log-probs, values and estimates, so the first update starts at ratio = 1 (first-minibatch KL < 1e-6).
+- **Estimator path (tested):** L_est alone drops 8.40 → 0.40 in 40 steps on a fixed batch.
+- **Also tested:** checkpoint round-trip; blind-age bins cover every step; the CLI end-to-end for both modes (2 updates, async envs, files and columns).
+- **Logging** (`runs/<name>/`):
+  - `updates.csv`: success, outcome counts, strict success, impact v_z, level and window, losses, KL, clip fraction, explained variance, log σ, estimate error by blind age (vision), sps.
+  - `episodes.csv`: one row per episode.
+  - `curriculum.csv`: one row per window.
+  - `config.json`.
+  - Checkpoints `latest.pt`, `u<N>.pt`, `level_<L>.pt` (git-ignored).
+
 ### 11.2 Auxiliary estimation loss (Eq. 1, p.5545)
 
 L_est_t = (1/6) Σ_i (s_rel_t,i − s̃_rel_t,i)², raw units (m, m/s), minimised
@@ -546,7 +566,7 @@ r_active_t = −α · [β (L_est_t+1 − τ)]_0^1, with α = 0.1, β = 1.0, τ =
 | 9 | Reward | **DONE 30 Sep: 19/19** (§6); D3 → literal after the landscape |
 | 10 | Curriculum | **DONE 30 Sep: 9/9** (§7) |
 | 11 | Network | **DONE 30 Sep: 10/10** (§10), 5.85M params |
-| 12 | PPO + L_est | smoke run (with your approval) |
+| 12 | PPO + L_est | **BUILT 30 Sep: 10/10 CPU tests**; GPU fit check and smoke run need approval |
 | 13 | r_active | hand-computed on a recorded rollout |
 | 14 | Evaluation script | reproduces the oracle's result |
 | 15 | PACMAN keypoint pad | single change, after the above |
