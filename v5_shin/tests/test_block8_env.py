@@ -127,7 +127,7 @@ def test_action_scaling_and_clipping():
 
 
 def test_termination_and_truncation_flags():
-    env = make(mode="privileged", dr=DRConfig.off())
+    env = make(mode="privileged", dr=DRConfig.off(), reward_fn=None)   # reward tested in Block 9
     try:
         env.reset(seed=0, options={"c": 0.0, "spawn": dict(pos=np.array([0, 0, PAD_TOP_Z + 5]),
                                                           yaw=0.0, psi_plat=0.0)})

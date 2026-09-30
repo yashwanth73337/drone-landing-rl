@@ -12,7 +12,8 @@ actor may read, via ACTOR_KEYS (the privilege boundary):
 Action: Box(-1, 1, (4,)) -> heading-frame [vx, vy, vz, yaw_rate] =
         clip(a, -1, 1) * [10, 10, 3, pi/3]   (SPEC §5; yaw limit = controller clamp)
 
-Reward: 0.0 until Block 9 plugs in reward_fn(env, info) -> float.
+Reward: reward_fn="paper" (default) -> envs.reward.ShinReward() (Table III, D3, D4);
+        a callable with reset(env) and __call__(env, info); or None -> 0.0 (tests only).
 Rendering: exactly one render per reset() and per step() in vision modes; none for P.
 """
 import gymnasium as gym
@@ -42,10 +43,13 @@ class ShinLandingEnv(gym.Env):
     metadata = {"render_modes": []}
 
     def __init__(self, mode="vision", c=1.0, seed=0, renderer="egl", egl=None, dr=None,
-                 reward_fn=None, gains_mode="random"):
+                 reward_fn="paper", gains_mode="random"):
         assert mode in ACTOR_KEYS, mode
         self.mode = mode
         self.c = float(c)
+        if reward_fn == "paper":
+            from .reward import ShinReward
+            reward_fn = ShinReward()
         self.reward_fn = reward_fn
         self.render_images = mode == "vision"
         if not self.render_images:
@@ -74,6 +78,8 @@ class ShinLandingEnv(gym.Env):
             self.sim._seed_streams(seed)           # gains stay as sampled at env init
         c = (options or {}).get("c", self.c)
         info = self.sim.reset(c=c, spawn=(options or {}).get("spawn"))
+        if hasattr(self.reward_fn, "reset"):
+            self.reward_fn.reset(self)
         obs, extra = self._obs()
         return obs, {**info, **extra, "c": c}
 

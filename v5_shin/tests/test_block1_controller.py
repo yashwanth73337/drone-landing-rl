@@ -163,3 +163,29 @@ def test_high_speed_chase():
     print(f"\n[chase 10 m/s] t(9.5 m/s)={t_reach:.2f}s  min dz={dz:.3f} m  "
           f"steps with a saturated motor={sat*100:.1f}%")
     assert t_reach < 3.0 and dz > -1.0
+
+
+def test_jitter_sinks_documented_property():
+    """DOCUMENTED PROPERTY (found in Block 9), not a goal. AerialGym's LMF2 motors spin UP in
+    50-80 ms but DOWN in 5 ms, so under jittery commands the delivered thrust averages below
+    the commanded thrust. With a zero vertical-velocity command and zero-mean coloured
+    lateral jitter, the drone sinks. Trace (seed 0): commanded Fz 14.06 N, delivered 12.71 N,
+    delivered vertical 12.08 N vs weight 12.16 N; motors clipped on 0.3% of substeps.
+    Steady turns do NOT sink (-0.003 m/s at 30 deg tilt). If this test starts failing, the
+    motor model or the controller changed."""
+    rng = np.random.default_rng(0)
+    cid = make_client()
+    try:
+        quad = LMF2Quad(cid, rng, P.sample_gains(rng, "nominal"))
+        quad.reset_pose([0, 0, 50.0])
+        z0, v = quad.state()["pos"][2], np.zeros(2)
+        for _ in range(150):
+            v = 0.7 * v + 0.3 * rng.normal(0, 1.0, 2) * 3
+            for _ in range(P.SUBSTEPS):
+                quad.apply_control([v[0], v[1], 0.0, 0.0])
+                p.stepSimulation(physicsClientId=cid)
+        rate = (quad.state()["pos"][2] - z0) / 15.0
+        print(f"\n[jitter] vz command 0, lateral jitter sigma 1: mean vertical velocity {rate:+.3f} m/s")
+        assert rate < -0.3
+    finally:
+        p.disconnect(cid)

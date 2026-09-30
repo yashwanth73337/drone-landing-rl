@@ -24,7 +24,7 @@ V5 does not import from or copy V1–V4 code (`src/envs`, `src/policies`,
 |---|---|---|
 | D1 | Env base: gym-pybullet-drones `BaseAviary`, or our own gymnasium env on raw PyBullet? | **DECIDED: raw PyBullet, own env.** BaseAviary calls `_computeReward()` before `_computeTerminated()` (notes §10), is CF2X-centric, and bundles DSLPIDControl. We still use PyBullet (the decided simulator) but none of its drone scaffolding. |
 | D2 | Quad model | **DECIDED: AerialGym LMF2 (1.24 kg).** The Table II gains are exactly AerialGym's `lmf2_controller_config.py`, so LMF2 is the airframe the paper's controller was tuned for [inferred]. The lab quad matters only for Semester-2 sim-to-real. |
-| D3 | Vertical-speed-penalty sign (§6) | **DECIDED: prose meaning**: penalise descent faster than 0.5 m/s. The literal form is kept as config `vz_penalty='literal'` for a later check (see §6 risk note). |
+| D3 | Vertical-speed-penalty sign (§6) | **DECIDED 30 Sep (second decision, after the Block 9 landscape): the LITERAL printed equation −[v_z + 0.5]⁺ is the default.** The prose reading (penalise descent > 0.5 m/s) is kept as `vz_penalty='prose'`, a single-change ablation. Impact speed is reported with every result. |
 | D4 | Δz sign convention (§6) | **ACCEPTED: Δz = z_pad_top − z_drone** (negative while above), so "undershoot" = below the pad top. |
 | D5 | Curriculum rule (§7) | **ACCEPTED:** Levels 10, 20, …, 80; c = level/80; promote at ≥80% success over each 512-episode window; no demotion. |
 | D6 | Clip on platform speed and yaw-rate random walk (§3) | **ACCEPTED:** v ∈ [0, 8c] m/s, \|ω\| ≤ 30°/s |
@@ -213,20 +213,15 @@ Shaping terms, r_shaping = Σ w_i r_i (Table III, p.5545), where [x]_a^b = clip(
 |---|---|---|---|
 | Lateral progress | [d_xy,t−1 − d_xy,t]_{−1}^{1} | 1.0 | [paper]; d_xy = horizontal drone–pad-centre distance |
 | Vertical progress | [\|Δz_t−1\| − \|Δz_t\|]_{−1}^{1} / max(d_xy,t, 1) | 1.0 | [paper] |
-| Vertical speed penalty | −[v_z + 0.5]_0^∞ as printed. **V5 (D3): −[−v_z − 0.5]_0^∞** (z up) | 0.5 | [deviation from the literal equation]: follows the prose |
+| Vertical speed penalty | −[v_z + 0.5]_0^∞ as printed. **V5 (D3): as printed** (z up); prose reading −[−v_z − 0.5]_0^∞ = ablation | 0.5 | [paper] equation; the prose contradicts it |
 | Undershoot penalty | −𝟙[Δz_t > 0] Δz_t | 1.0 | **[ambiguous] D4** |
 | Yaw-rate penalty | −\|ω_z\| | 2.0 | [paper]; ω_z = commanded, in rad/s [unspecified] |
 
-**D3, vertical speed (decided: prose meaning).** V5 penalises descent faster than
-0.5 m/s: −0.5·max(0, −v_z − 0.5). The printed equation −[v_z + 0.5]⁺ would instead
-penalise every v_z > −0.5 m/s, including hovering (0.25 per step).
-
-**Risk to watch.** With the prose version, a drone hovering at the start has lateral
-progress 0, vertical progress 0, and no penalty, so it gets exactly 0 per step. The
-only way to lose reward is to crash (−10). That is the same stall optimum found in
-Strand B (notes §10: "hovering became the value-maximising policy"). The yaw
-penalty and r_active do not change this. If variant P (privileged actor) hovers,
-the first thing to test is `vz_penalty='literal'`, as a single change.
+**D3, vertical speed (decided: the literal equation; first decision was the prose reading, revised after the Block 9 landscape).**
+- The printed −[v_z + 0.5]⁺ penalises every v_z > −0.5 m/s, including hovering (0.25 per step).
+- The prose ("penalise fast descent") would mean −[−v_z − 0.5]⁺ instead.
+- The landscape below shows that the prose reading leaves hovering and following worth about as much as landing, while the literal one makes descent always pay. That is consistent with the paper's fast PPO convergence.
+- Cost of the literal reading: it rewards diving, since success does not check impact speed. So **impact speed (pre-contact, Block 5) is reported with every result**, and `vz_penalty='prose'` is the single-change ablation.
 
 **D4, Δz sign.** Table I gives the altitude offset Δz_0 ∈ U(2, 8) m as positive,
 but "undershoot" only makes sense if Δz > 0 means the drone is below the pad
@@ -242,7 +237,66 @@ Terminal and edge cases:
 | Timeout at 300 steps | no terminal reward stated | shaping only; treated as truncation (bootstrap from V(s)) | [unspecified] |
 | Terminal step | ±10 **replaces** the shaping on that step | same | [paper] |
 
-**Test:** reward on hand-built states matches hand calculation for every term and every branch (`tests/test_reward.py`).
+**Test:** `tests/test_block9_reward.py` (below).
+
+### Block 9 verified (30 Sep 2026), `envs/reward.py`, `tests/test_block9_reward.py`, 19/19 pass
+
+- **Implementation:** `ShinReward(vz_penalty='literal')` is the env default (D3). The first build defaulted to 'prose'. All numbers below were re-run after the switch, and a test asserts the default. Shaping terms are hand-checked on 5 constructed cases: both clip bounds, the max(d, 1) branch, undershoot below the pad top, and yaw. Both D3 variants are tested.
+- **Env integration:** reward equals an independent recomputation from the sim state every step.
+- **Terminals:** +10 success; −10 for crash_ground, crash_platform, drift and tilt (all tested); the timeout step gets shaping only.
+- **v_z** is the drone's world vertical velocity at the end of the step; **ω_z** is the commanded yaw rate in rad/s [unspecified].
+
+**Reward landscape (`scripts/reward_profile.py`):** start 6 m above a stationary pad (c = 0, DR off), hold position laterally, fixed descent rate. Discounted return uses γ = 0.99.
+
+| rate | prose (ablation): return / disc. | per-step shaping, h 0–4 m | **literal (D3)**: return / disc. | per-step, h 0–4 m |
+|---|---|---|---|---|
+| hover | 0.00 / **0.00** | 0 | −75.0 / −23.8 | −0.25 |
+| 0.3 m/s | 15.74 / 3.76 | +0.030 | −5.23 / −5.78 | −0.072 |
+| 0.5 m/s | 15.75 / **6.15** | +0.050 | 14.09 / 4.69 | +0.047 |
+| 1.0 m/s | 2.48 / 0.03 | −0.145 | 15.37 / 9.02 | +0.099 |
+| 1.5 m/s | −2.03 / −2.95 | −0.34 | 15.43 / 10.68 | +0.15 |
+| 2.5 m/s | −6.07 / −6.14 | −0.72 | 15.60 / **12.23** | +0.24 |
+
+(Starting 3 m off-axis gives the same ordering; hover earns +3.07 disc. from lateral progress under prose.)
+
+**From Table I spawns (full DR, γ = 0.99, seeds 9000 + i; `reward_profile --hover-sweep / --policy-sweep`):**
+
+Hover (zero command), 200 episodes per c. The platform drives away at c > 0: drift −10 in 48–96% of episodes.
+
+| c | prose: mean disc. return | **literal: mean disc. return** |
+|---|---|---|
+| 0 | 0.05 | −22.4 |
+| 0.125 | −4.54 | −25.8 |
+| 0.25 | −8.09 | −26.2 |
+| 0.5 | −12.05 | −25.7 |
+| 1.0 | −15.43 | −24.9 |
+
+Oracle policies (100 episodes each). `follow` = the oracle laterally, but it never commands descent.
+
+| reward | policy | c = 0.125 | c = 1.0 |
+|---|---|---|---|
+| prose | follow | 2.59 (1% land) | 4.75 (78% land*) |
+| prose | land, ≤ 0.5 m/s | **7.65** | 4.98 |
+| prose | land, ≤ 1.5 m/s | 2.44 | 0.78 |
+| literal | follow | −17.94 | −8.04 |
+| literal | land, ≤ 0.5 m/s | 6.98 | 4.45 |
+| literal | land, ≤ 1.5 m/s | **10.24** | **6.64** |
+
+\* See the finding below: "follow" sinks and lands by accident at c = 1.
+
+**Reading.**
+- Under **prose**, following without descending is worth almost as much as landing at c = 1 (4.75 vs 4.98), and fast landings are worth less than following. That is a weak landing incentive with the same structure as the V3/V4 stalls.
+- Under **literal**, not descending is strongly negative at every c, and faster landings are worth more. This is why D3 was switched.
+
+**Finding: jittery commands make the drone sink (dynamics, faithful to AerialGym, not a bug).**
+- With v_z command = 0 and zero-mean coloured lateral jitter (σ = 1), the drone sinks at **−0.66 to −0.72 m/s** (−1.1 m/s at σ = 4). Steady turns do not sink (−0.003 m/s at 30° tilt).
+- **Cause (traced):** LMF2 motors spin *up* in 50–80 ms but *down* in 5 ms, so under changing commands delivered thrust averages below commanded (12.71 vs 14.06 N). The attitude lag's thrust projection costs a further ~0.6 N, and motors clip on only 0.3% of substeps.
+- The vertical loop (K_v,z 1.3–1.7, no integral) cannot recover the deficit.
+- **Consequences:**
+  - (1) A tracking policy fed a random-walk platform velocity descends "for free"; at c = 1 it lands 78% of the time without commanding descent.
+  - (2) Early PPO exploration noise pushes the drone down.
+  - (3) Real PX4 attitude/thrust loops differ, so this is a sim property to remember for sim-to-real.
+- Locked by `test_block1_controller.py::test_jitter_sinks_documented_property`.
 
 ## 7. Curriculum
 
@@ -408,7 +462,7 @@ Held-out accuracy is **data- and step-limited** (2.9M params), not a pipeline fa
   - A full-rate turn at 10 m/s needs ~47° of bank, so the body-z rate is then cos(tilt) of the world yaw rate. That's physics, not a scaling bug.
 - **Privilege boundary (tested):** two envs that differ only in platform velocity give **identical** actor views (image, u) but different targets and critic inputs. The actor can infer platform motion only from images over time.
 - **Also tested:** noise is present in u and absent in the critic (σ ≈ 0.05 m/s); `terminated` vs `truncated` (timeout = truncated at 300 steps); one render per reset and per step in vision mode and none for P; seeded determinism; `AsyncVectorEnv` with spawn workers.
-- **Reward:** placeholder 0.0 until Block 9 (`reward_fn` hook).
+- **Reward:** Block 9, `reward_fn='paper'` = `ShinReward()` (literal D3) by default.
 
 ## 11. Learning
 
@@ -454,7 +508,7 @@ r_active_t = −α · [β (L_est_t+1 − τ)]_0^1, with α = 0.1, β = 1.0, τ =
 | 6 | Sensor noise + domain randomisation | **DONE 30 Sep: 17/17** (§8). Oracle under full DR 99% at c = 1 |
 | 7 | CNN perception (ArUco base) | **DONE 30 Sep: 5/5** (§10); probe data-limited as expected |
 | 8 | Obs/action interfaces | **DONE 30 Sep: 10/10** (§10), privilege boundary tested |
-| 9 | Reward | §6 test |
+| 9 | Reward | **DONE 30 Sep: 19/19** (§6); D3 → literal after the landscape |
 | 10 | Curriculum | level logic on a synthetic success stream |
 | 11 | Network | dims per §10 |
 | 12 | PPO + L_est | smoke run (with your approval) |
