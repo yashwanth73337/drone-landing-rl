@@ -37,6 +37,7 @@ V5 does not import from or copy V1–V4 code (`src/envs`, `src/policies`,
 | D13 | Ground textures (Table II: 50 IDs) | **ACCEPTED:** 50 procedurally generated textures from a seeded script. |
 | D15 | Collision geometry / success region (§9, Block 4) | **DECIDED 30 Sep: keep the paper's definition (pad-top contact) with the AerialGym 0.5 m box; also report strict success (`com_over_pad`) in every evaluation.** |
 | D16 | Vertical-speed action limit (§5) | **DECIDED 30 Sep, after P_smoke_s1: v_z limit ±1 m/s** (was ±3, [unspecified]). The paper's Fig. 9 shows descents of ≲ 1 m/s in every scenario; with ±3 the privileged policy dived at ~4.1 m/s impact. Env parameter `vz_max` (default 1.0); `reward_profile.py` keeps 3.0 because it studies the reward, not the limit. |
+| D17 | D3 re-test under the ±1 m/s limit (§6, §15) | **PROPOSED 1 Oct, pending owner confirmation: keep the literal D3.** One prose run (P_smoke_prose_vz1_s1) was tested against the literal run under D16. Under prose the curriculum never left L10 in 2M steps; the run lost the success-rate comparison (30.5% vs 81.5% pinned at c = 1), gained 337/1000 tilt crashes, and still touched down at −1.66 m/s median. The touchdown speed is set by the thrust-deficit sink, not by the reward sign (§15). |
 | D14 | Training seeds per configuration | **ACCEPTED:** 3 for configurations that are reported; 1 for exploratory runs. |
 
 ---
@@ -647,3 +648,45 @@ Every run: name, commit of the code, task, and outcome. Training-time numbers co
 - **Reading, landing style:** it **dives**. Median impact is −4.1 m/s throughout, landing ~2 s after spawn. This is the diving risk of the literal D3; it is inconsistent with the paper's Fig. 9 (≲ 1 m/s descents), which led to D16.
 - **Reading, D15:** about 1 in 9 "successes" is an edge contact with the CoM off the pad (0.909 vs 0.807).
 - **What this does NOT establish:** a pinned evaluation (seed 9000); more than one seed; behaviour under the D16 limit.
+
+### P_smoke_vz1_s1 (30 Sep 2026): variant P, seed 1, 2M steps, v_z limit ±1 (D16), literal D3
+
+- **Config:** same as P_smoke_s1 except `--vz-max 1.0` (the new default). Code at `59b2389`. The training-time table can be regenerated from the committed `updates.csv`.
+
+### P_smoke_prose_vz1_s1 (1 Oct 2026): variant P, seed 1, 2M steps, v_z limit ±1, PROSE D3 (D17 test)
+
+- **Config:** same as P_smoke_vz1_s1 except `--vz-penalty prose`. 489 updates at ~1,450 steps/s.
+- **Learning (training-time, stochastic policy):**
+  - **The curriculum never left L10** (c = 0.125); the window success rate stayed around 0.4–0.55.
+  - **Zero timeouts**, so the hover/follow stall predicted in Block 9 did not appear.
+  - **Tilt (> 80°) crashes grew instead:** 1 per update at u1, ~150–250 of ~330–400 episodes per update after u130. Ground/platform crashes fell to single digits.
+  - The episode count per update doubled (~150 → ~330), so episodes got shorter; tilt comes early.
+- **Cause of the tilt: NOT established.** Unverified hypotheses:
+  - (a) r2 = Δ|dz| / max(d, 1) does not telescope. Descending near the pad pays more than climbing far from it costs, and prose leaves climbing unpenalised, so an up/down pumping cycle can pay.
+  - (b) With no pressure to descend, episodes are spent chasing at full lateral command; the controller has no tilt limit (Block 5 watch item).
+
+### Pinned evaluation: all three smoke runs, `latest.pt`, c = 1.0, 1,000 episodes, seed base 9000, deterministic mean actions
+
+| run | timestep | success [95% CI] | strict | ground / platform / tilt / drift / timeout | impact v_z median (p10 / p90) | steps (median) |
+|---|---|---|---|---|---|---|
+| P_smoke_s1 (±3, literal) | ~2.0M | 91.4% [89.5, 93.0] | 78.0% | 76 / 10 / 0 / 0 / 0 | −3.36 (−4.26 / −2.10) | 22 |
+| P_smoke_vz1_s1 (±1, literal) | ~2.0M | 81.5% [79.0, 83.8] | 68.6% | 158 / 24 / 3 / 0 / 0 | −2.30 (−3.07 / −1.54) | 28 |
+| P_smoke_prose_vz1_s1 (±1, prose) | 2,002,944 | 30.5% [27.7, 33.4] | 26.6% | 190 / 26 / 337 / 142 / 0 | −1.66 (−2.23 / −1.09) | 27 |
+
+**Safe success.** Fraction of ALL 1,000 episodes that succeed with |impact v_z| ≤ threshold; the strict success fraction is in brackets.
+
+| run | ≤ 0.5 m/s | ≤ 1.0 | ≤ 1.5 | ≤ 2.0 |
+|---|---|---|---|---|
+| P_smoke_s1 | 0.000 (0.000) | 0.004 (0.000) | 0.029 (0.013) | 0.080 (0.033) |
+| P_smoke_vz1_s1 | 0.000 (0.000) | 0.012 (0.002) | 0.076 (0.027) | 0.249 (0.159) |
+| P_smoke_prose_vz1_s1 | 0.003 (0.003) | 0.025 (0.020) | 0.097 (0.084) | 0.248 (0.218) |
+
+**Readings:**
+
+- **Neither D3 reading reproduces the paper's slow descents.** With the command limited to −1 m/s, both runs touch down faster than any commanded speed: median −2.30 (literal) and −1.66 (prose). The excess of 0.7–1.3 m/s matches the Block 1 thrust-deficit sink (−0.66 to −1.1 m/s under jittery commands, motor τ_up 50–80 ms vs τ_down 5 ms). **So touchdown speed is set by the actuation model plus policy jitter, not by the reward sign.**
+- **The paper's success metric hides unsafe touchdowns.** At c = 1, safe success (≤ 1 m/s) is at most 2.5% in every run, including those at 81–91% on the paper metric.
+- **The prose reading costs far more than it gains.** It gives 3× lower success and a stalled curriculum, and gains only +0.013 safe success (≤ 1 m/s) and ~0.06 strict safe success (≤ 2 m/s). This supports keeping the literal D3 (D17).
+- **Caveats:**
+  - one seed per configuration;
+  - the prose policy was trained only at c = 0.125 and is evaluated at c = 1, which is out of its training distribution. Its drift count (142) partly reflects this.
+- **Not yet done:** a direct test of the sink as the cause, e.g. evaluating the same checkpoints with symmetric motor time constants. That is an evaluation-only change, needs no training, and is not yet approved.
