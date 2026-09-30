@@ -14,6 +14,7 @@ early at the first terminal substep.
 import numpy as np
 import pybullet as p
 
+from . import dr as DR
 from . import lmf2_params as P
 from .camera import Camera
 from .ground import Ground
@@ -36,17 +37,29 @@ TOP_NORMAL_MIN = 0.7            # contactNormalOnB.z for "top face"
 
 
 class LandingSim:
-    def __init__(self, renderer="tiny", egl=False, marker=True, gains_mode="random", seed=0):
-        self.rng = np.random.default_rng(seed)
+    """dr: DR.DRConfig; default = everything on (the paper). Tests of the bare dynamics
+    pass DR.DRConfig.off(). Independent RNG streams per source: turning a DR group on or
+    off never changes the spawn / platform sequence of a pinned seed."""
+
+    def __init__(self, renderer="tiny", egl=False, marker=True, gains_mode="random", seed=0,
+                 dr=None):
+        self.dr = dr if dr is not None else DR.DRConfig()
+        self._seed_streams(seed)
         self.cid = make_client(egl=egl)
-        self.ground = Ground(self.cid)
+        self.ground = Ground(self.cid, randomize=self.dr.visual)
         self.plat = Platform(self.cid, marker=marker)
         # Table II control gains: sampled once per env ("Env. init")
-        self.gains = P.sample_gains(self.rng, gains_mode)
-        self.quad = LMF2Quad(self.cid, self.rng, self.gains)
+        self.gains = P.sample_gains(self.rng_gains, gains_mode)
+        self.quad = LMF2Quad(self.cid, self.rng_gains, self.gains)
         self.cam = Camera(self.cid, renderer=renderer)
+        self.visual = DR.default_visual()
         self.t = 0
         self.done = True
+
+    def _seed_streams(self, seed):
+        ss = np.random.SeedSequence(seed)
+        g = [np.random.default_rng(c) for c in ss.spawn(5)]
+        self.rng, self.rng_gains, self.rng_dr, self.rng_vis, self.rng_noise = g
 
     def close(self):
         p.disconnect(self.cid)
@@ -57,11 +70,11 @@ class LandingSim:
         set covers the whole gain range."""
         from .lee_controller import LeeVelocityController
         from .quad import MotorModel
-        self.rng = np.random.default_rng(seed)
+        self._seed_streams(seed)
         if resample_gains:
-            self.gains = P.sample_gains(self.rng)
+            self.gains = P.sample_gains(self.rng_gains)
             self.quad.ctrl = LeeVelocityController(self.gains)
-            self.quad.motors = MotorModel(self.rng)
+            self.quad.motors = MotorModel(self.rng_gains)
 
     # ---- spawn ----------------------------------------------------------------
     def sample_spawn(self, c):
@@ -90,19 +103,36 @@ class LandingSim:
         """spawn: optional dict(pos, yaw, psi_plat[, roll, pitch, v]) for hand-built tests."""
         sp = spawn if spawn is not None else self.sample_spawn(c)
         self.plat.reset(self.rng, c, xy=(0.0, 0.0), psi=sp["psi_plat"])
-        self.quad.reset_pose(sp["pos"], yaw=sp["yaw"], v=sp.get("v", (0, 0, 0)),
+        # Table II initial state (episode start); a hand-built spawn's "v" overrides
+        v0, w0 = DR.sample_initial_rates(self.rng_dr) if self.dr.initial_state \
+            else (np.zeros(3), np.zeros(3))
+        if "v" in sp:
+            v0, w0 = np.asarray(sp["v"], float), np.asarray(sp.get("w_body", (0, 0, 0)), float)
+        self.quad.reset_pose(sp["pos"], yaw=sp["yaw"], v=v0, w_body=w0,
                              roll=sp.get("roll", 0.0), pitch=sp.get("pitch", 0.0))
+        # Table II visual appearance (episode start)
+        if self.dr.visual:
+            self.visual = DR.sample_episode_visual(self.rng_vis)
+            self.ground.set_appearance(self.visual["tex"], self.visual["scale"],
+                                       self.visual["brightness"])
+            self.visual["scale"] = self.ground.appearance["scale"]     # discretised value
+        else:
+            self.visual = DR.default_visual()
+        self.quad.ext_force[:] = 0.0
+        self.quad.ext_torque[:] = 0.0
         p.performCollisionDetection(physicsClientId=self.cid)
         self.t = 0
         self.done = False
         self.spawn = sp
-        return dict(spawn=sp)
+        return dict(spawn=sp, v0=v0, w0=w0, visual=dict(self.visual))
 
     # ---- step -----------------------------------------------------------------
     def step(self, cmd):
         """cmd = [vx, vy, vz, yaw_rate] in the heading frame, held for one policy
         step. Returns (terminated, truncated, info)."""
         assert not self.done, "call reset()"
+        if self.dr.forces:          # Table II: resampled each (policy) step, held 0.1 s
+            self.quad.ext_force[:], self.quad.ext_torque[:] = DR.sample_disturbance(self.rng_dr)
         outcome, sub = None, P.SUBSTEPS
         for k in range(P.SUBSTEPS):
             # velocities just before this substep: the contact solver zeroes the
@@ -163,6 +193,17 @@ class LandingSim:
             tilt_deg=float(np.degrees(np.arccos(np.clip(s["R"][2, 2], -1, 1)))),
             com_over_pad=bool(np.all(np.abs(rel_pad) <= PAD_SIZE / 2)),
         )
+
+    # ---- sensing ----------------------------------------------------------------
+    def render(self):
+        """One camera frame with this episode's light direction and RGB scaling."""
+        s = self.quad.state()
+        return self.cam.render(s["R"], s["pos"], light_direction=self.visual["light_dir"],
+                               rgb_scale=self.visual["rgb_scale"])
+
+    def measure(self):
+        """u_t = [v_body, q]: noisy if dr.sensor_noise (p.5546)."""
+        return DR.measure(self.quad.state(), self.rng_noise, noise=self.dr.sensor_noise)
 
     # ---- helpers for oracles and tests ------------------------------------------
     def true_relative_state(self):

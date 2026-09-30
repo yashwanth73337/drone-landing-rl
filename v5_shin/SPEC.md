@@ -30,12 +30,12 @@ V5 does not import from or copy V1–V4 code (`src/envs`, `src/policies`,
 | D6 | Clip on platform speed and yaw-rate random walk (§3) | **ACCEPTED:** v ∈ [0, 8c] m/s, \|ω\| ≤ 30°/s |
 | D7 | Table II external torque "±4e3 N·m" | **ACCEPTED:** Treat as a typo for **±4e-3 N·m**. |
 | D8 | PPO implementation | **ACCEPTED:** **Own compact recurrent PPO in PyTorch** (cleanRL-style). The auxiliary loss inside the objective, the asymmetric critic, and reward injection before GAE are all awkward in SB3/sb3-contrib. |
-| D9 | CNN input resolution | **ACCEPTED:** Render at 512×320 [paper]; downsample to **256×160** for the CNN. Final choice after the throughput benchmark. |
+| D9 | CNN input resolution | **DECIDED 30 Sep: render 512×320 [paper], INTER_AREA downsample to 256×160.** Lab desktop (T400, EGL, 16 envs): 326 steps/s (direct 256×160 would be 1,029). |
 | D10 | Auxiliary-loss weight λ_est | **ACCEPTED:** 1.0 |
 | D11 | Include the privileged-actor variant P (§11) | **ACCEPTED:** **Yes.** It is the control ceiling for the state-vs-control question. |
 | D12 | Initial drone yaw | **ACCEPTED:** Face the pad ± U(−15°, 15°); rejection-sample until the pad centre is in the image. |
 | D13 | Ground textures (Table II: 50 IDs) | **ACCEPTED:** 50 procedurally generated textures from a seeded script. |
-| D15 | Collision geometry / success region (§9, Block 4) | **OPEN**: see §9 |
+| D15 | Collision geometry / success region (§9, Block 4) | **DECIDED 30 Sep: keep the paper's definition (pad-top contact) with the AerialGym 0.5 m box; also report strict success (`com_over_pad`) in every evaluation.** |
 | D14 | Training seeds per configuration | **ACCEPTED:** 3 for configurations that are reported; 1 for exploratory runs. |
 
 ---
@@ -275,6 +275,47 @@ The 512-episode window also fixes the noisy 20-episode promotion problem (notes 
 | RGB scaling c_R,G,B | U(0.5, 1.0) | episode start | [paper]; applied before the grayscale conversion |
 | Light direction φ | U(45°, 135°) | episode start | [paper]; PyBullet `lightDirection` elevation |
 
+### Block 6 verified (30 Sep 2026), `envs/dr.py`, `envs/ground.py`, `tests/test_block6_dr.py`, 17/17 pass
+
+**Implementation choices:**
+
+| Item | V5 | Status |
+|---|---|---|
+| External force | world frame, U(±0.75) N per axis, re-sampled each **policy** step and held for its 10 substeps | [paper] range; frame and "step" [unspecified] |
+| External torque | body frame, U(±4e-3) N·m per axis, same timing | [D7] |
+| Initial v_0 / ω_0 | U(±1) m/s per axis (world); U(±10) °/s per axis (body) | [paper] |
+| Ground texture | 50 procedural RGB 256 px textures (`assets/ground_tex/`, seed 1300 + i; noise, tiles, stripes, blobs), committed | [D13] |
+| Texture scale s | **17 levels, 0.40–1.20 in steps of 0.05**, nearest to the U(0.4, 1.2) draw; each level is its own OBJ | [deviation]: PyBullet leaks ~40 KB per re-created visual |
+| Ground brightness I | multiplies the ground texture colour (rgba) | [paper] |
+| RGB scaling c | per channel, applied to the **whole image** before grayscale (folded into the luma weights) | [interpretation] |
+| Light direction φ | U(45°, 135°) elevation in the world x–z plane, passed on every render (EGL light state is sticky) | [interpretation] |
+| Velocity sensor | R^T v + N(0, 0.05²) per body axis | [paper] |
+| Attitude sensor | q ⊗ exp(δθ), δθ ~ N(0, (0.5°)²) per body axis; [x, y, z, w] with q_w ≥ 0 | [paper] + sign [unspecified] |
+| RNG | independent seeded streams (spawn/platform, gains, physical DR, visual DR, sensor noise): toggling a DR group never changes a pinned seed's spawns (tested) | ours |
+| Default | `LandingSim` defaults to **all DR on**; bare-dynamics tests pass `DRConfig.off()` | ours |
+
+**Verified:**
+
+| Check | Result |
+|---|---|
+| Velocity noise (20k samples) | σ = 0.0500–0.0503 m/s per axis, \|corr\| ≤ 0.003 |
+| Attitude noise | σ = 0.497–0.504° per axis |
+| Constant 0.75 N force, hover command | v_ss = 0.2008 m/s; theory F/(m K_v) = 0.2016 |
+| Constant 4e-3 N·m yaw torque | ω_z = 0.0484 rad/s; theory M/K_ω,z = 0.0485 (the controller has no yaw-angle hold) |
+| Disturbances | fresh each policy step, held over its 10 substeps; KS passes |
+| Initial state | the state after reset equals the sample; KS passes |
+| Texture scale, **both renderers** | transition count within 3.7% of 10/(0.25 s) at all 17 levels |
+| Brightness 0.5 / RGB 0.5 | ground mean ratio 0.498–0.499 / 0.500 |
+| Light 45° vs 90° | mean \|Δ\| 18.9 (tiny) / 10.6 (EGL) grey levels |
+| Oracle, full DR, 200 ep, seeds 9000 + i | c = 0: 100%; **c = 1: 99%** (2 timeouts, 0 crashes). DR off: c = 1 98.5% |
+| ArUco at spawn, full DR, 150 ep | 88.7% detected, 0 false ids. With visual DR off on the **same spawns**: 89.3%. Visual DR changes 1/150. Misses are framing: in 12/150 spawns a marker corner is out of view (allowed, since only the pad centre must be); fully in view → 96–97% |
+
+**Rendering bugs found (both now have regression tests):**
+
+1. **The ground's collision plane was being drawn.** A body with no visual is drawn from its collision shape, and a PyBullet plane gets a default checker texture. It z-fought our textured quad **since Block 3**. Block 3's marker tests were unaffected (the pad is above it); every ground-appearance measurement would have been. Fix: a hidden dummy visual 50 m underground.
+2. **EGL shares one mesh between visual shapes loaded from the same file**, so meshScale variants rendered blank (TinyRenderer was fine). Fix: one OBJ per scale. Visual-DR tests now run under both renderers.
+3. `cv2.transform` with a one-row matrix already returns (h, w); an extra `[..., 0]` produced a column vector. Caught by the brightness and detection tests.
+
 ## 9. Initial conditions (Table I, p.5544)
 
 | Item | Value | Status |
@@ -298,7 +339,7 @@ The 512-episode window also fixes the noisy 20-episode promotion problem (notes 
 - **Logged at every terminal step:** relative position (world and pad frame), relative velocity, tilt, and `com_over_pad`.
 - **Hand-built checks, all pass:** centre drop, side crash, lateral and vertical drift, tilt, timeout, step-after-done, and a velocity-matched descent onto a **6 m/s** platform (success, pad-frame error −0.085 / −0.051 m).
 - **Spawn (2000 resets, seed 20000):** 99.8% accepted on the first draw. KS passes for dx, dy, dz, ψ_0 and the D12 yaw offset. Pad-centre pixel row v spans 11–305 of 320 (median 190).
-- **D15 open, success region.** The LMF2 collision cube is 0.5 m, so pad-top contact is reachable with the CoM up to 0.75 + 0.25 = **1.0 m** from the pad centre, 0.25 m past the pad edge. Measured: CoM offset 0.97 m → `success` with `com_over_pad = False`; 1.03 m → `crash_ground`. The CoM sits 0.24 m above the pad at touchdown.
+- **D15 (decided: keep the paper's definition + report strict), success region.** The LMF2 collision cube is 0.5 m, so pad-top contact is reachable with the CoM up to 0.75 + 0.25 = **1.0 m** from the pad centre, 0.25 m past the pad edge. Measured: CoM offset 0.97 m → `success` with `com_over_pad = False`; 1.03 m → `crash_ground`. The CoM sits 0.24 m above the pad at touchdown.
 
 ### Block 5 verified (30 Sep 2026), scripted oracle on the TRUE state
 
@@ -380,9 +421,9 @@ r_active_t = −α · [β (L_est_t+1 − τ)]_0^1, with α = 0.1, β = 1.0, τ =
 | 1 | Physics + quad + controller | **DONE 30 Sep: 30/30** (§2.2) |
 | 2 | Platform motion | **DONE 30 Sep: 10/10** (§3) |
 | 3 | Camera + ArUco pad + EGL; **throughput benchmark** | **DONE 30 Sep: 18/18** (§4). Benchmark on the lab desktop: *pending* |
-| 4 | Termination | **DONE 30 Sep: 12/12** (§9). D15 open |
+| 4 | Termination | **DONE 30 Sep: 12/12** (§9). D15 decided |
 | 5 | **Scripted oracle on true state** | **DONE 30 Sep: 99% at c = 1** (200 ep), random reachability OK (§9) |
-| 6 | Sensor noise + domain randomisation | empirical statistics match §5 and §8 |
+| 6 | Sensor noise + domain randomisation | **DONE 30 Sep: 17/17** (§8). Oracle under full DR 99% at c = 1 |
 | 7 | CNN perception (ArUco base) | shapes, gradients, no ground truth in actor input |
 | 8 | Obs/action interfaces | actor-invariance-to-s_rel test |
 | 9 | Reward | §6 test |

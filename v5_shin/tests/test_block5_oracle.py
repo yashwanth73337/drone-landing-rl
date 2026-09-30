@@ -8,7 +8,7 @@ Run:  python -m pytest v5_shin/tests/test_block5_oracle.py -v -s
 import numpy as np
 import pytest
 
-from v5_shin.envs import lmf2_params as P
+from v5_shin.envs.dr import DRConfig
 from v5_shin.envs.landing_sim import LandingSim
 from v5_shin.envs.platform import PAD_TOP_Z
 from v5_shin.scripts.eval_oracle import run_episodes, summarize
@@ -16,7 +16,15 @@ from v5_shin.scripts.eval_oracle import run_episodes, summarize
 
 @pytest.fixture(scope="module")
 def sim():
+    """Full Table II DR (the paper's training condition)."""
     s = LandingSim(seed=9000)
+    yield s
+    s.close()
+
+
+@pytest.fixture(scope="module")
+def sim_bare():
+    s = LandingSim(seed=9000, dr=DRConfig.off())
     yield s
     s.close()
 
@@ -42,8 +50,9 @@ def test_random_actions_move_the_drone(sim):
     assert summ["min_height_median"] < 1.0      # random exploration reaches pad height
 
 
-def test_impact_velocity_is_pre_contact(sim):
+def test_impact_velocity_is_pre_contact(sim_bare):
     """touchdown rel_vel must be the impact velocity, not the post-contact one."""
+    sim = sim_bare
     sim.reset(c=0.0, spawn=dict(pos=np.array([0, 0, PAD_TOP_Z + 2.0]), yaw=0.0, psi_plat=0.0))
     for _ in range(200):
         te, tr, info = sim.step([0, 0, -1.0, 0])

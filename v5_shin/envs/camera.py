@@ -59,7 +59,7 @@ class Camera:
         eye = pos + R @ OFFSET_B
         return eye, R @ self.axis_b, R @ self.up_b
 
-    def render(self, R, pos, light_direction=None):
+    def render(self, R, pos, light_direction=None, rgb_scale=None):
         """R: body->world, pos: body origin (world). Returns uint8 gray (h, w)."""
         eye, fwd, up = self.pose_world(R, np.asarray(pos, float))
         view = p.computeViewMatrix(eye.tolist(), (eye + fwd).tolist(), up.tolist())
@@ -73,9 +73,13 @@ class Camera:
             flags=p.ER_NO_SEGMENTATION_MASK, physicsClientId=self.cid, **kw)
         rgba = np.asarray(rgba, dtype=np.uint8).reshape(self.h, self.w, 4)
         self.n_renders += 1
-        # BT.601 luma via OpenCV fixed-point: 0.17 ms vs 2.9 ms for the float
-        # matmul at 512x320; differs by at most 1 grey level.
-        return cv2.cvtColor(rgba, cv2.COLOR_RGBA2GRAY)
+        if rgb_scale is None:
+            # BT.601 luma via OpenCV fixed-point: 0.17 ms vs 2.9 ms for the float
+            # matmul at 512x320; differs by at most 1 grey level.
+            return cv2.cvtColor(rgba, cv2.COLOR_RGBA2GRAY)
+        # Table II RGB scaling folded into the luma weights (one pass, saturating)
+        w = np.array([[0.299 * rgb_scale[0], 0.587 * rgb_scale[1], 0.114 * rgb_scale[2], 0.0]])
+        return cv2.transform(rgba, w)          # 1-row matrix -> single-channel (h, w) uint8
 
     def project(self, pts_world, R, pos):
         """Analytic pinhole projection -> (N, 2) pixels (u right, v down) and depth."""

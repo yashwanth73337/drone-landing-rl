@@ -10,6 +10,7 @@ import pytest
 
 from v5_shin.envs import landing_sim as LS
 from v5_shin.envs import lmf2_params as P
+from v5_shin.envs.dr import DRConfig
 from v5_shin.envs.landing_sim import LandingSim
 from v5_shin.envs.platform import PAD_SIZE, PAD_TOP_Z
 
@@ -18,7 +19,7 @@ REACH = PAD_SIZE / 2 + P.COLLISION_HALF    # contact reach at yaw 0 (1.0 m with 
 
 @pytest.fixture(scope="module")
 def sim():
-    s = LandingSim(seed=1, gains_mode="nominal")
+    s = LandingSim(seed=1, gains_mode="nominal", dr=DRConfig.off())
     yield s
     s.close()
 
@@ -119,7 +120,7 @@ def test_moving_platform_success(sim):
 
 # ---------------------------------------------------------------- spawn
 def test_spawn_statistics():
-    sim = LandingSim(seed=20000)
+    sim = LandingSim(seed=20000, dr=DRConfig.off())
     try:
         rows = [sim.sample_spawn(1.0) for _ in range(2000)]
     finally:

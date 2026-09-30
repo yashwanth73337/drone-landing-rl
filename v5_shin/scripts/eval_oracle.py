@@ -17,15 +17,17 @@ from collections import Counter
 
 import numpy as np
 
+from v5_shin.envs.dr import DRConfig
 from v5_shin.envs.landing_sim import LandingSim
 from v5_shin.policies.oracle import OracleController, random_policy
 
 OUTCOMES = ["success", "crash_ground", "crash_platform", "tilt", "drift", "timeout"]
 
 
-def run_episodes(policy="oracle", c=1.0, episodes=200, seed_base=9000, hold=1, sim=None):
+def run_episodes(policy="oracle", c=1.0, episodes=200, seed_base=9000, hold=1, sim=None,
+                 dr=True):
     own = sim is None
-    sim = sim or LandingSim(seed=seed_base)
+    sim = sim or LandingSim(seed=seed_base, dr=DRConfig() if dr else DRConfig.off())
     oracle = OracleController()
     rows = []
     try:
@@ -86,13 +88,16 @@ def main():
     ap.add_argument("--c", type=float, default=1.0)
     ap.add_argument("--episodes", type=int, default=200)
     ap.add_argument("--seed-base", type=int, default=9000)
+    ap.add_argument("--dr", choices=["on", "off"], default="on",
+                    help="Table II domain randomisation (default on = paper)")
     ap.add_argument("--name", default=None)
     a = ap.parse_args()
-    name = a.name or f"eval_{a.policy}{'' if a.policy == 'oracle' else f'_h{a.hold}'}_c{a.c}_s{a.seed_base}"
+    name = a.name or (f"eval_{a.policy}{'' if a.policy == 'oracle' else f'_h{a.hold}'}"
+                      f"_c{a.c}_dr{a.dr}_s{a.seed_base}")
     out = os.path.join(os.path.dirname(__file__), "..", "runs", name)
     os.makedirs(out, exist_ok=True)
     t0 = time.time()
-    rows = run_episodes(a.policy, a.c, a.episodes, a.seed_base, a.hold)
+    rows = run_episodes(a.policy, a.c, a.episodes, a.seed_base, a.hold, dr=(a.dr == "on"))
     summ = summarize(rows)
     summ.update(vars(a), wall_s=round(time.time() - t0, 1))
     with open(os.path.join(out, "episodes.csv"), "w", newline="") as f:
