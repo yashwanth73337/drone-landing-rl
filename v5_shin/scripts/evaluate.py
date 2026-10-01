@@ -8,12 +8,21 @@ Actions are the policy MEAN by default (--stochastic to sample).
 Reports (summary.json + episodes.csv):
   success rate with Wilson 95% CI, strict success (CoM over pad), outcome counts,
   impact v_z / speed (pre-contact), steps to land,
+  safe success: fraction of ALL episodes that succeed with |impact v_z| <= 0.5/1.0/1.5/2.0 m/s
+               (and the strict version),
+  commanded v_z: last step and mean of the last 5 steps (per episode; median over successes),
   vision: estimate RMSE (pos m, vel m/s) over ALL frames (Table IV style) and the mean
           position error per blind-age bin (visible, 1-15, 16-60, 61-120, >120 steps).
 
+Motor diagnostic (--motor, evaluation only; training always uses 'asym'):
+  asym (default, AerialGym LMF2) | sym_slow (spin-down tau := spin-up tau) | sym_fast (both 5 ms).
+  Only the motor time constants change; every RNG stream and pinned episode is the same.
+
 Usage:
   python -m v5_shin.scripts.evaluate --run P_smoke_s1 --ckpt latest.pt --episodes 1000 --c 1.0
-Output: v5_shin/runs/<run>/eval_<ckpt>_c<c>_s<seed_base>_<det|sto>/
+  python -m v5_shin.scripts.evaluate --run P_smoke_vz1_s1 --c 1.0 --motor sym_slow
+Output: v5_shin/runs/<run>/eval_<ckpt>_c<c>_s<seed_base>_<det|sto>[_<motor>]/
+        (the suffix is omitted for 'asym', so existing result folders keep their names)
 """
 import argparse
 import csv
@@ -28,6 +37,8 @@ import torch
 
 RUNS = os.path.join(os.path.dirname(__file__), "..", "runs")
 BINS = ((0, 0), (1, 15), (16, 60), (61, 120), (121, 10 ** 9))
+SAFE_VZ = (0.5, 1.0, 1.5, 2.0)          # m/s, |impact v_z| thresholds for safe success
+MOTOR_MODES = ("asym", "sym_slow", "sym_fast")
 
 
 def wilson(k, n, z=1.96):
@@ -41,7 +52,7 @@ def wilson(k, n, z=1.96):
 
 
 def _worker(args):
-    ckpt_path, cfg, seeds, c, stochastic, renderer = args
+    ckpt_path, cfg, seeds, c, stochastic, renderer, motor = args
     from v5_shin.envs.reward import ShinReward
     from v5_shin.envs.shin_env import ShinLandingEnv
     from v5_shin.policies.shin_policy import ShinPolicy
@@ -53,7 +64,7 @@ def _worker(args):
     pol.eval()
     env = ShinLandingEnv(mode=mode, renderer=renderer, egl=(renderer == "egl"), seed=0, c=c,
                          reward_fn=ShinReward(cfg.get("vz_penalty", "literal")),
-                         vz_max=cfg.get("vz_max", 3.0))
+                         vz_max=cfg.get("vz_max", 3.0), motor_mode=motor)
     keys = ("image", "u", "critic", "target", "s_rel") if mode == "vision" else ("u", "critic", "target", "s_rel")
     rows, frames = [], []
     try:
@@ -64,6 +75,7 @@ def _worker(args):
             start = torch.ones(1)
             age = 0 if info["pad_centre_in_view"] else 1
             ret, k = 0.0, 0
+            cmd_vz = []
             g = torch.Generator().manual_seed(seed)
             while True:
                 tob = {kk: torch.as_tensor(np.asarray(obs[kk]))[None] for kk in keys}
@@ -79,6 +91,7 @@ def _worker(args):
                     e = s_est[0, 0].numpy() - obs["target"]
                     frames.append((age, float(np.linalg.norm(e[:3])), e[:3] ** 2, e[3:] ** 2))
                 obs, r, te, tr, info = env.step(a.numpy())
+                cmd_vz.append(float(info["action_cmd"][2]))
                 ret += r
                 k += 1
                 start = torch.zeros(1)
@@ -93,6 +106,7 @@ def _worker(args):
                              impact_vz=float(rv[2]), impact_speed=float(np.linalg.norm(rv)),
                              touch_x_pad=float(rp[0]), touch_y_pad=float(rp[1]),
                              tilt_deg=float(info.get("tilt_deg", np.nan)),
+                             cmd_vz_last=cmd_vz[-1], cmd_vz_last5=float(np.mean(cmd_vz[-5:])),
                              dz0=float(sp["dxyz0"][2]), d0=float(np.hypot(*sp["dxyz0"][:2])),
                              v_plat0=float(env.sim.plat.v)))
     finally:
@@ -101,12 +115,14 @@ def _worker(args):
 
 
 def evaluate(run, ckpt, episodes=1000, c=1.0, seed_base=9000, workers=8, stochastic=False,
-             renderer="tiny", out=None):
+             renderer="tiny", out=None, motor="asym"):
+    if motor not in MOTOR_MODES:
+        raise ValueError(f"motor {motor!r} not in {MOTOR_MODES}")
     run_dir = os.path.join(RUNS, run)
     cfg = json.load(open(os.path.join(run_dir, "config.json")))
     seeds = [seed_base + i for i in range(episodes)]
     chunks = [seeds[i::workers] for i in range(workers) if seeds[i::workers]]
-    args = [(os.path.join(run_dir, ckpt), cfg, ch, c, stochastic, renderer) for ch in chunks]
+    args = [(os.path.join(run_dir, ckpt), cfg, ch, c, stochastic, renderer, motor) for ch in chunks]
     t0 = time.time()
     if len(args) == 1:
         res = [_worker(args[0])]
@@ -123,13 +139,17 @@ def evaluate(run, ckpt, episodes=1000, c=1.0, seed_base=9000, workers=8, stochas
     vz = np.array([r["impact_vz"] for r in succ]) if succ else np.array([np.nan])
     summ = dict(run=run, ckpt=ckpt, timestep=None, c=c, episodes=n, seed_base=seed_base,
                 policy="stochastic" if stochastic else "deterministic(mean)", renderer=renderer,
-                vz_max=cfg.get("vz_max", 3.0), mode=cfg["mode"],
+                vz_max=cfg.get("vz_max", 3.0), mode=cfg["mode"], motor=motor,
                 success_rate=oc["success"] / n, success_ci95=wilson(oc["success"], n),
                 strict_success_rate=strict / n, strict_ci95=wilson(strict, n), outcomes=oc,
                 impact_vz_median=float(np.median(vz)), impact_vz_p10=float(np.percentile(vz, 10)),
                 impact_vz_p90=float(np.percentile(vz, 90)),
                 impact_speed_median=float(np.median([r["impact_speed"] for r in succ])) if succ else None,
                 steps_to_land_median=float(np.median([r["steps"] for r in succ])) if succ else None,
+                safe_success={f"<={t}": sum(abs(r["impact_vz"]) <= t for r in succ) / n for t in SAFE_VZ},
+                safe_strict_success={f"<={t}": sum(abs(r["impact_vz"]) <= t and r["com_over_pad"]
+                                                   for r in succ) / n for t in SAFE_VZ},
+                cmd_vz_last5_median=float(np.median([r["cmd_vz_last5"] for r in succ])) if succ else None,
                 wall_s=round(time.time() - t0, 1))
     try:
         d = torch.load(os.path.join(run_dir, ckpt), map_location="cpu", weights_only=False)
@@ -148,6 +168,8 @@ def evaluate(run, ckpt, episodes=1000, c=1.0, seed_base=9000, workers=8, stochas
                 mean_m=float(perr[(ages >= lo) & (ages <= hi)].mean()) if ((ages >= lo) & (ages <= hi)).any() else None)
             for lo, hi in BINS}
     tag = f"eval_{os.path.splitext(ckpt)[0]}_c{c}_s{seed_base}_{'sto' if stochastic else 'det'}"
+    if motor != "asym":
+        tag += f"_{motor}"
     out = out or os.path.join(run_dir, tag)
     os.makedirs(out, exist_ok=True)
     with open(os.path.join(out, "episodes.csv"), "w", newline="") as f:
@@ -169,12 +191,17 @@ def main():
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--stochastic", action="store_true")
     ap.add_argument("--renderer", choices=["tiny", "egl"], default="tiny")
+    ap.add_argument("--motor", choices=MOTOR_MODES, default="asym",
+                    help="motor time-constant diagnostic (evaluation only)")
     a = ap.parse_args()
     for c in a.c:
-        s, _ = evaluate(a.run, a.ckpt, a.episodes, c, a.seed_base, a.workers, a.stochastic, a.renderer)
-        show = {k: s[k] for k in ("run", "ckpt", "timestep", "c", "episodes", "policy", "success_rate",
-                                  "success_ci95", "strict_success_rate", "outcomes", "impact_vz_median",
-                                  "impact_vz_p10", "impact_vz_p90", "steps_to_land_median", "wall_s")}
+        s, _ = evaluate(a.run, a.ckpt, a.episodes, c, a.seed_base, a.workers, a.stochastic, a.renderer,
+                        motor=a.motor)
+        show = {k: s[k] for k in ("run", "ckpt", "timestep", "c", "episodes", "policy", "motor",
+                                  "success_rate", "success_ci95", "strict_success_rate", "outcomes",
+                                  "impact_vz_median", "impact_vz_p10", "impact_vz_p90",
+                                  "cmd_vz_last5_median", "safe_success", "safe_strict_success",
+                                  "steps_to_land_median", "wall_s")}
         for k in ("est_pos_rmse_m", "est_vel_rmse_ms", "est_pos_err_by_blind_age"):
             if k in s:
                 show[k] = s[k]

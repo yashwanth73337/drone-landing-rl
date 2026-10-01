@@ -11,14 +11,30 @@ from .lee_controller import LeeVelocityController
 URDF = os.path.join(os.path.dirname(__file__), "..", "assets", "lmf2.urdf")
 
 
+MOTOR_MODES = ("asym", "sym_slow", "sym_fast")
+
+
 class MotorModel:
     """AerialGym rpm-space first-order model, Euler discretisation with the
-    'discrete' mixing factor 1/(dt + tau). The thrust constant cancels."""
+    'discrete' mixing factor 1/(dt + tau). The thrust constant cancels.
 
-    def __init__(self, rng, dt=P.PHYSICS_DT):
+    mode (DIAGNOSTIC ONLY, evaluation; training always uses the default):
+      'asym'      AerialGym LMF2: spin-up tau ~ U(0.05, 0.08) s, spin-down 0.005 s (default)
+      'sym_slow'  spin-down tau := spin-up tau (per motor): removes only the asymmetry
+      'sym_fast'  spin-up tau := 0.005 s: both directions fast (near-ideal motors)
+    tau_inc is drawn from rng in every mode, so the caller's RNG stream is unchanged."""
+
+    def __init__(self, rng, dt=P.PHYSICS_DT, mode="asym"):
+        if mode not in MOTOR_MODES:
+            raise ValueError(f"motor mode {mode!r} not in {MOTOR_MODES}")
         self.dt = dt
+        self.mode = mode
         self.tau_inc = rng.uniform(*P.TAU_INC_RANGE, size=4)
         self.tau_dec = np.full(4, P.TAU_DEC)
+        if mode == "sym_slow":
+            self.tau_dec = self.tau_inc.copy()
+        elif mode == "sym_fast":
+            self.tau_inc = np.full(4, P.TAU_DEC)
         self.thrust = np.full(4, P.MASS * P.G / 4.0)
 
     def reset(self, thrust=None):
@@ -38,7 +54,7 @@ class MotorModel:
 class LMF2Quad:
     """Owns one drone body inside an existing PyBullet client."""
 
-    def __init__(self, client, rng, gains):
+    def __init__(self, client, rng, gains, motor_mode="asym"):
         self.cid = client
         # URDF_USE_INERTIA_FROM_FILE is essential: without it PyBullet computes
         # inertia from the 0.5 m collision box (0.052 kg m^2, ~4x too large).
@@ -46,7 +62,7 @@ class LMF2Quad:
                                physicsClientId=client)
         p.changeDynamics(self.body, -1, linearDamping=P.LINEAR_DAMPING,
                          angularDamping=P.ANGULAR_DAMPING, physicsClientId=client)
-        self.motors = MotorModel(rng)
+        self.motors = MotorModel(rng, mode=motor_mode)
         self.ctrl = LeeVelocityController(gains)
         self.last_wrench = np.zeros(4)
         self.ext_force = np.zeros(3)    # world frame, N  (Table II; Block 6)

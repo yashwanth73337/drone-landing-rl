@@ -9,6 +9,7 @@
   "renderer": "tiny",
   "vz_max": 1.0,
   "mode": "privileged",
+  "motor": "asym",
   "success_rate": 0.815,
   "success_ci95": [
     0.7897434604481715,
@@ -32,6 +33,19 @@
   "impact_vz_p90": -1.5390355404558798,
   "impact_speed_median": 2.6816099770801234,
   "steps_to_land_median": 28.0,
-  "wall_s": 7.2,
+  "safe_success": {
+    "<=0.5": 0.0,
+    "<=1.0": 0.012,
+    "<=1.5": 0.076,
+    "<=2.0": 0.249
+  },
+  "safe_strict_success": {
+    "<=0.5": 0.0,
+    "<=1.0": 0.002,
+    "<=1.5": 0.027,
+    "<=2.0": 0.159
+  },
+  "cmd_vz_last5_median": -0.30954800099134444,
+  "wall_s": 7.1,
   "update": 489
 }

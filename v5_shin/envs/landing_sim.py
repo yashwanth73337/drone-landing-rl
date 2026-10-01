@@ -42,15 +42,16 @@ class LandingSim:
     off never changes the spawn / platform sequence of a pinned seed."""
 
     def __init__(self, renderer="tiny", egl=False, marker=True, gains_mode="random", seed=0,
-                 dr=None):
+                 dr=None, motor_mode="asym"):
         self.dr = dr if dr is not None else DR.DRConfig()
+        self.motor_mode = motor_mode           # 'asym' always in training; others: diagnostic
         self._seed_streams(seed)
         self.cid = make_client(egl=egl)
         self.ground = Ground(self.cid, randomize=self.dr.visual)
         self.plat = Platform(self.cid, marker=marker)
         # Table II control gains: sampled once per env ("Env. init")
         self.gains = P.sample_gains(self.rng_gains, gains_mode)
-        self.quad = LMF2Quad(self.cid, self.rng_gains, self.gains)
+        self.quad = LMF2Quad(self.cid, self.rng_gains, self.gains, motor_mode=motor_mode)
         self.cam = Camera(self.cid, renderer=renderer)
         self.visual = DR.default_visual()
         self.t = 0
@@ -74,7 +75,7 @@ class LandingSim:
         if resample_gains:
             self.gains = P.sample_gains(self.rng_gains)
             self.quad.ctrl = LeeVelocityController(self.gains)
-            self.quad.motors = MotorModel(self.rng_gains)
+            self.quad.motors = MotorModel(self.rng_gains, mode=self.motor_mode)
 
     # ---- spawn ----------------------------------------------------------------
     def sample_spawn(self, c):
