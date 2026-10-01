@@ -3,6 +3,8 @@
 Usage (from the repo root). DO NOT start a run without the supervisor/owner's go-ahead:
   python -m v5_shin.scripts.train_ppo --mode privileged --name P_smoke --total-steps 200000
   python -m v5_shin.scripts.train_ppo --mode vision --name A_s1 --seed 1 --total-steps 20000000
+  --motor {asym,sym_slow,sym_fast}: motor time constants (default asym = AerialGym LMF2, the
+  paper's setting). sym_* are DIAGNOSTIC ablations of the actuator sink (SPEC §15, 1 Oct).
 
 Outputs in v5_shin/runs/<name>/:
   config.json            every argument + versions (tracked)
@@ -31,17 +33,18 @@ from v5_shin.policies.ppo import PPOConfig, PPOTrainer
 RUNS = os.path.join(os.path.dirname(__file__), "..", "runs")
 
 
-def make_env_fn(mode, seed, renderer, vz_penalty, c, dr_off=False, vz_max=VZ_MAX_DEFAULT):
+def make_env_fn(mode, seed, renderer, vz_penalty, c, dr_off=False, vz_max=VZ_MAX_DEFAULT,
+                motor_mode="asym"):
     def f():
         return ShinLandingEnv(mode=mode, renderer=renderer, egl=(renderer == "egl"), seed=seed, c=c,
                               reward_fn=ShinReward(vz_penalty), vz_max=vz_max,
-                              dr=DRConfig.off() if dr_off else DRConfig())
+                              dr=DRConfig.off() if dr_off else DRConfig(), motor_mode=motor_mode)
     return f
 
 
 def make_venv(mode, n_envs, seed, renderer, vz_penalty, c, sync=False, dr_off=False,
-              vz_max=VZ_MAX_DEFAULT):
-    fns = [make_env_fn(mode, seed * 1000 + i, renderer, vz_penalty, c, dr_off, vz_max)
+              vz_max=VZ_MAX_DEFAULT, motor_mode="asym"):
+    fns = [make_env_fn(mode, seed * 1000 + i, renderer, vz_penalty, c, dr_off, vz_max, motor_mode)
            for i in range(n_envs)]
     kw = dict(autoreset_mode=gym.vector.AutoresetMode.SAME_STEP)
     if sync:
@@ -91,6 +94,8 @@ def main():
     ap.add_argument("--vz-penalty", choices=["literal", "prose"], default="literal")
     ap.add_argument("--vz-max", type=float, default=VZ_MAX_DEFAULT,
                     help="vertical-speed action limit (m/s); D16 default 1.0 (P_smoke_s1 used 3.0)")
+    ap.add_argument("--motor", choices=["asym", "sym_slow", "sym_fast"], default="asym",
+                    help="motor time constants; asym = AerialGym LMF2 (default); sym_* = diagnostic")
     ap.add_argument("--renderer", choices=["egl", "tiny"], default="egl")
     ap.add_argument("--start-level", type=int, default=10)
     ap.add_argument("--ckpt-every", type=int, default=50, help="updates")
@@ -109,7 +114,8 @@ def main():
                     minibatches=a.minibatches, micro_chunks=micro, lr=a.lr,
                     lambda_est=(a.lambda_est if a.mode == "vision" else 0.0))
     cur = Curriculum(start_level=a.start_level)
-    venv = make_venv(a.mode, a.n_envs, a.seed, a.renderer, a.vz_penalty, cur.c, vz_max=a.vz_max)
+    venv = make_venv(a.mode, a.n_envs, a.seed, a.renderer, a.vz_penalty, cur.c, vz_max=a.vz_max,
+                     motor_mode=a.motor)
     tr = PPOTrainer(venv, cfg, device=a.device, total_updates=total_updates)
     if a.resume:
         d = torch.load(os.path.join(run, "latest.pt"), map_location=a.device, weights_only=False)

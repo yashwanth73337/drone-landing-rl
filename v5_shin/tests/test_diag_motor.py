@@ -102,3 +102,34 @@ def test_evaluate_motor_flag_same_episodes():
         assert os.path.isdir(os.path.join(run, "eval_c_c1.0_s9000_det_sym_slow"))
     finally:
         shutil.rmtree(run, ignore_errors=True)
+
+
+def test_training_venv_and_cli_motor_flag():
+    """Training with --motor: envs get the mode, config.json records it, and evaluate.py
+    defaults to the motor the run was trained with."""
+    import json, subprocess, sys
+    from v5_shin.scripts.train_ppo import make_venv
+    for m in ("asym", "sym_slow"):
+        venv = make_venv("privileged", 2, 1, "tiny", "literal", 0.125, sync=True, motor_mode=m)
+        try:
+            assert all(e.unwrapped.sim.motor_mode == m for e in venv.envs)
+        finally:
+            venv.close()
+    name = "_pytest_train_motor"
+    run = os.path.join(os.path.dirname(__file__), "..", "runs", name)
+    shutil.rmtree(run, ignore_errors=True)
+    try:
+        cmd = [sys.executable, "-m", "v5_shin.scripts.train_ppo", "--mode", "privileged", "--name", name,
+               "--total-steps", "32", "--n-envs", "2", "--n-steps", "16", "--seq-len", "4",
+               "--minibatches", "2", "--renderer", "tiny", "--device", "cpu", "--motor", "sym_slow"]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=600,
+                             cwd=os.path.join(os.path.dirname(__file__), "..", ".."))
+        assert res.returncode == 0, res.stderr[-3000:]
+        assert json.load(open(os.path.join(run, "config.json")))["motor"] == "sym_slow"
+        s, _ = evaluate(name, "latest.pt", episodes=2, c=1.0, workers=1)
+        assert s["motor"] == "sym_slow" and s["trained_motor"] == "sym_slow"
+        assert os.path.isdir(os.path.join(run, "eval_latest_c1.0_s9000_det_sym_slow"))
+        s, _ = evaluate(name, "latest.pt", episodes=2, c=1.0, workers=1, motor="asym")
+        assert s["motor"] == "asym" and os.path.isdir(os.path.join(run, "eval_latest_c1.0_s9000_det"))
+    finally:
+        shutil.rmtree(run, ignore_errors=True)

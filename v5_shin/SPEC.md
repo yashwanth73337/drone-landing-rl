@@ -80,6 +80,7 @@ files `config/robot_config/lmf2_config.py`, `config/controller_config/lmf2_contr
 | Allocation | rows [Fz, τx, τy, τz]: τ arms ±0.13 m, thrust-to-torque ratio 0.07 | [AG] |
 | Motor thrust | per motor [0.1, 10] N → thrust/weight 3.29 | [AG] |
 | Motor model | first-order in √thrust (rpm) space, discrete factor dt/(dt+τ); τ_up ~ U(0.05, 0.08) s per motor, τ_down = 0.005 s; thrust constant cancels | [AG] |
+| Motor integration | **Euler** with the discrete factor dt/(dt+τ). AerialGym's LMF2 config sets no `integration_scheme`, so AerialGym falls back to **RK4**. When the paper was submitted (10 Nov 2025), that RK4 had a sign bug, fixed 3 May 2026 in commit `8a15191`: it closed e^x − 1 of the gap instead of 1 − e^−x. Fraction of the gap closed per 10 ms step at τ_down: ours 0.667, AerialGym now 0.486, AerialGym paper-era 0.947 (τ_up 0.11–0.17 in all three). Measured jitter sink: −0.725 / −0.695 / −0.780 m/s, so the effect is small (1 Oct audit). | [deviation], small |
 | Damping | linear and angular rigid-body damping 0.01 | [AG] |
 | Aero drag | none (LMF2 damping coefficients are all 0) | [AG] |
 | PyBullet load flags | `URDF_MERGE_FIXED_LINKS \| URDF_USE_INERTIA_FROM_FILE`. **Without the second flag PyBullet computes inertia from the collision box (0.052 kg·m², ~4× too large). Found by the Block 1 test.** | ours |
@@ -690,3 +691,70 @@ Every run: name, commit of the code, task, and outcome. Training-time numbers co
   - one seed per configuration;
   - the prose policy was trained only at c = 0.125 and is evaluated at c = 1, which is out of its training distribution. Its drift count (142) partly reflects this.
 - **Not yet done:** a direct test of the sink as the cause, e.g. evaluating the same checkpoints with symmetric motor time constants. That is an evaluation-only change, needs no training, and is not yet approved.
+
+### Motor time-constant diagnostic (1 Oct 2026): evaluation only, no retraining
+
+- **Question:** do fast touchdowns come from the motor asymmetry (spin-up 50–80 ms, spin-down 5 ms) making the drone sink faster than commanded?
+- **Method:**
+  - `evaluate.py --motor {asym, sym_slow, sym_fast}`:
+    - `sym_slow`: τ_down := τ_up per motor;
+    - `sym_fast`: τ_up := 5 ms.
+  - Only the time constants change. RNG streams are unchanged (tested), so the episodes are the same.
+  - Checkpoint `P_smoke_vz1_s1/latest.pt` (2,002,944 steps; literal D3; ±1 m/s), c = 1.0, 1,000 episodes, seed base 9000, deterministic.
+  - Code: `envs/quad.py` (`MotorModel(mode=...)`), `envs/landing_sim.py`, `envs/shin_env.py`, `scripts/evaluate.py`; tests in `tests/test_diag_motor.py` (4); 164 tests pass.
+  - The `asym` arm reproduced the earlier evaluation exactly (same seed, outcome, steps and impact v_z in all 1,000 episodes).
+
+| motors | success [95% CI] | strict | ground / platform / tilt / drift / timeout | impact v_z median (p10 / p90) | commanded v_z, last 5 steps (median) |
+|---|---|---|---|---|---|
+| asym (as trained) | 81.5% [79.0, 83.8] | 68.6% | 158 / 24 / 3 / 0 / 0 | −2.30 (−3.07 / −1.54) | −0.31 |
+| sym_slow | 68.7% [65.8, 71.5] | 49.3% | 217 / 72 / 24 / 0 / 0 | −1.52 (−2.20 / −0.92) | −0.33 |
+| sym_fast | 55.8% [52.7, 58.9] | 33.6% | 138 / 105 / 63 / 0 / 136 | −0.78 (−1.30 / −0.37) | −0.33 |
+
+Safe success. Fraction of all 1,000 episodes; strict version in brackets.
+
+| motors | ≤ 0.5 m/s | ≤ 1.0 | ≤ 1.5 | ≤ 2.0 |
+|---|---|---|---|---|
+| asym | 0.000 (0.000) | 0.012 (0.002) | 0.076 (0.027) | 0.249 (0.159) |
+| sym_slow | 0.019 (0.004) | 0.102 (0.037) | 0.331 (0.190) | 0.569 (0.386) |
+| sym_fast | 0.101 (0.048) | 0.407 (0.239) | 0.533 (0.323) | 0.554 (0.332) |
+
+**Readings:**
+
+- **Hypothesis supported.** Touchdown speed falls as the motor lag is made symmetric and then fast: −2.30 → −1.52 → −0.78 m/s median. The commanded descent near touchdown is about the same in all three arms (−0.31 to −0.33 m/s).
+  - The asymmetry alone accounts for ~0.8 m/s.
+  - The remaining symmetric lag accounts for ~0.7 m/s more.
+- **The policy uses the sink as its descent mechanism.**
+  - It commands only ~−0.3 m/s over its last 0.5 s, yet hits at −2.3 m/s.
+  - With fast symmetric motors, 136/1,000 episodes time out (0 with asym): without the thrust deficit, those episodes never come down within 30 s.
+  - This is an exploit of the simulated actuators. Real ESCs/motors are not known to have a 10–16× faster spin-down; this should be checked against the lab hardware before Semester 2.
+- **Caveats:**
+  - The policy is out of its training distribution in the sym arms, so their success rates are NOT what a policy trained on symmetric motors would achieve.
+  - The command over the last 0.5 s is not the steady-state command. With K_v,z 1.3–1.7, the vertical loop's time constant is ~0.6–0.75 s, so earlier commands still shape the impact speed. So "impact minus last command" is not a pure measure of the sink.
+  - One seed; one checkpoint.
+- **Relevance to the paper:** AerialGym's LMF2 config has the same constants. Its paper-era integrator spun down even faster (sink −0.78 vs our −0.73 m/s in the scratch study). So the paper's simulator very likely had the same sink. How the paper obtained ≲ 1 m/s descents (Fig. 9) is unknown.
+
+### P_smoke_vz1_symslow_s1 (1 Oct 2026): variant P trained with symmetric motors (single change)
+
+- **Config:** identical to P_smoke_vz1_s1 (seed 1, 2M steps, literal D3, ±1 m/s, full DR, tiny renderer) except `--motor sym_slow` (τ_down := τ_up, 50–80 ms). Code: `train_ppo.py --motor` (default asym); `evaluate.py` defaults to the trained motor. 165 tests pass.
+- **Training:** reached L80 (c = 1); zero timeouts; at the end ~100 successes, ~20–30 crashes and 3–11 tilt per ~130 episodes per update.
+
+Pinned evaluation: `latest.pt`, 2,002,944 steps, c = 1.0, 1,000 episodes, seed base 9000, deterministic.
+
+| trained on | evaluated on | success [95% CI] | strict | ground / platform / tilt / drift / timeout | impact v_z median (p10 / p90) | cmd v_z last 5 | safe ≤ 1.0 (strict) | safe ≤ 2.0 (strict) |
+|---|---|---|---|---|---|---|---|---|
+| asym | asym | 81.5% [79.0, 83.8] | 68.6% | 158 / 24 / 3 / 0 / 0 | −2.30 (−3.07 / −1.54) | −0.31 | 0.012 (0.002) | 0.249 (0.159) |
+| asym | sym_slow | 68.7% [65.8, 71.5] | 49.3% | 217 / 72 / 24 / 0 / 0 | −1.52 (−2.20 / −0.92) | −0.33 | 0.102 (0.037) | 0.569 (0.386) |
+| **sym_slow** | **sym_slow** | **89.7% [87.7, 91.4]** | 78.8% | 71 / 22 / 7 / 3 / 0 | **−1.93 (−2.72 / −1.22)** | −0.58 | 0.042 (0.028) | 0.495 (0.408) |
+| sym_slow | asym | 92.7% [90.9, 94.2] | 82.4% | 30 / 41 / 2 / 0 / 0 | −2.47 (−3.31 / −1.53) | −0.56 | 0.018 (0.013) | 0.238 (0.186) |
+
+**Readings:**
+
+- **Removing the motor asymmetry during training does NOT produce gentle landings.**
+  - On its own motors the new policy lands at −1.93 m/s median, and 90% of its landings are faster than 1.22 m/s.
+  - The command is capped at −1 m/s, and the sym_slow jitter sink is only ~0.2 m/s. So the policy found another way to come down faster than it can command, most likely tilt / attitude-lag thrust loss during aggressive lateral manoeuvres (unverified).
+- **So the asym diagnostic identified the mechanism the first policy used, not the root cause.**
+  - The root cause is the incentive. The literal D3 pays for descent, and the terminal +10 replaces the shaping on the contact step, so impact speed is never penalised, under either D3 reading.
+  - Success has no speed condition. PPO therefore descends as fast as the dynamics allow, by whatever means the simulator offers.
+  - Gentle landing is physically possible in this task: the oracle lands at −0.62 m/s at c = 1.
+- **Success:** sym_slow-trained 89.7% vs asym-trained 81.5% (in-distribution), and 92.7% when the sym_slow policy is flown on asym motors. This is one seed each; D14 requires 3 seeds before any difference is claimed.
+- **Implication for the reproduction:** touchdown speed is a property of the paper's task definition (reward + success criterion), not a simulator bug to fix. Keep the paper's motors (asym), and report safe success alongside the paper's metric. A safe-landing variant (an impact-speed condition or penalty) is a separate single-change experiment, after the reproduction.

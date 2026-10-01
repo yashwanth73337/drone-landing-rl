@@ -14,9 +14,10 @@ Reports (summary.json + episodes.csv):
   vision: estimate RMSE (pos m, vel m/s) over ALL frames (Table IV style) and the mean
           position error per blind-age bin (visible, 1-15, 16-60, 61-120, >120 steps).
 
-Motor diagnostic (--motor, evaluation only; training always uses 'asym'):
-  asym (default, AerialGym LMF2) | sym_slow (spin-down tau := spin-up tau) | sym_fast (both 5 ms).
-  Only the motor time constants change; every RNG stream and pinned episode is the same.
+Motor time constants (--motor): asym (AerialGym LMF2) | sym_slow (spin-down tau := spin-up tau) |
+  sym_fast (both 5 ms). Default: the motor the run was TRAINED with (config.json "motor"; runs
+  without the key were trained with asym). Only the time constants change; every RNG stream and
+  pinned episode is the same. The output folder gets a _<motor> suffix unless motor is asym.
 
 Usage:
   python -m v5_shin.scripts.evaluate --run P_smoke_s1 --ckpt latest.pt --episodes 1000 --c 1.0
@@ -115,11 +116,13 @@ def _worker(args):
 
 
 def evaluate(run, ckpt, episodes=1000, c=1.0, seed_base=9000, workers=8, stochastic=False,
-             renderer="tiny", out=None, motor="asym"):
-    if motor not in MOTOR_MODES:
-        raise ValueError(f"motor {motor!r} not in {MOTOR_MODES}")
+             renderer="tiny", out=None, motor=None):
     run_dir = os.path.join(RUNS, run)
     cfg = json.load(open(os.path.join(run_dir, "config.json")))
+    trained_motor = cfg.get("motor", "asym")
+    motor = motor or trained_motor
+    if motor not in MOTOR_MODES:
+        raise ValueError(f"motor {motor!r} not in {MOTOR_MODES}")
     seeds = [seed_base + i for i in range(episodes)]
     chunks = [seeds[i::workers] for i in range(workers) if seeds[i::workers]]
     args = [(os.path.join(run_dir, ckpt), cfg, ch, c, stochastic, renderer, motor) for ch in chunks]
@@ -140,6 +143,7 @@ def evaluate(run, ckpt, episodes=1000, c=1.0, seed_base=9000, workers=8, stochas
     summ = dict(run=run, ckpt=ckpt, timestep=None, c=c, episodes=n, seed_base=seed_base,
                 policy="stochastic" if stochastic else "deterministic(mean)", renderer=renderer,
                 vz_max=cfg.get("vz_max", 3.0), mode=cfg["mode"], motor=motor,
+                trained_motor=trained_motor,
                 success_rate=oc["success"] / n, success_ci95=wilson(oc["success"], n),
                 strict_success_rate=strict / n, strict_ci95=wilson(strict, n), outcomes=oc,
                 impact_vz_median=float(np.median(vz)), impact_vz_p10=float(np.percentile(vz, 10)),
@@ -191,13 +195,13 @@ def main():
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--stochastic", action="store_true")
     ap.add_argument("--renderer", choices=["tiny", "egl"], default="tiny")
-    ap.add_argument("--motor", choices=MOTOR_MODES, default="asym",
-                    help="motor time-constant diagnostic (evaluation only)")
+    ap.add_argument("--motor", choices=MOTOR_MODES, default=None,
+                    help="motor time constants (default: as trained, from config.json)")
     a = ap.parse_args()
     for c in a.c:
         s, _ = evaluate(a.run, a.ckpt, a.episodes, c, a.seed_base, a.workers, a.stochastic, a.renderer,
                         motor=a.motor)
-        show = {k: s[k] for k in ("run", "ckpt", "timestep", "c", "episodes", "policy", "motor",
+        show = {k: s[k] for k in ("run", "ckpt", "timestep", "c", "episodes", "policy", "motor", "trained_motor",
                                   "success_rate", "success_ci95", "strict_success_rate", "outcomes",
                                   "impact_vz_median", "impact_vz_p10", "impact_vz_p90",
                                   "cmd_vz_last5_median", "safe_success", "safe_strict_success",
