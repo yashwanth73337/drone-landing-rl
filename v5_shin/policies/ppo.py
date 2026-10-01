@@ -10,7 +10,10 @@ into micro-batches with gradient accumulation (one optimizer step per minibatch;
 to the unsplit update, which is tested). This is needed on a 4 GB GPU.
   loss = L_clip + vf_coef * mean((V - R)^2) - ent_coef * H + lambda_est * L_est
   L_est = mean over steps of (1/6) sum_i (s_rel_i - s~_i)^2           [paper Eq. 1]
-r_active (Block 13) plugs in via r_active_fn(buffer) -> (T, B) added to the rewards before GAE.
+r_active (Block 13) plugs in via r_active_fn(buffer) -> (T, B) added to the rewards before GAE
+  (policies/active_perception.ActivePerceptionReward). For the last rollout step the buffer holds
+  the estimate for the NEXT observation (s_est_next_last / target_next_last), computed without
+  advancing the LSTM state.
 """
 import numpy as np
 import torch
@@ -150,6 +153,14 @@ class PPOTrainer:
         if self.state is not None:
             out["h0"] = torch.stack(h0)       # (T/L, 1, B, H)
             out["c0"] = torch.stack(c0)
+            # estimate for the observation after the last step (L_est_{t+1} of step T-1);
+            # the stored LSTM state is NOT advanced: the next collect() starts from it again
+            tob = obs_to_tensor(self.obs, dev, self.keys)
+            _, s_next, _ = self.policy.actor_seq({k: v[None] for k, v in tob.items()},
+                                                 self.state, self.starts[None])
+            out["s_est_next_last"] = (s_next[0] if s_next is not None
+                                      else torch.zeros(B, 6, device=dev))
+            out["target_next_last"] = tob["target"]
         out["r_active"] = (self.r_active_fn(out) if self.r_active_fn is not None
                            else torch.zeros_like(out["rewards"]))
         adv, ret = compute_gae(out["rewards"] + out["r_active"], out["values"], out["next_values"],

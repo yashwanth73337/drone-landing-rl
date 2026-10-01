@@ -554,6 +554,23 @@ r_active_t = −α · [β (L_est_t+1 − τ)]_0^1, with α = 0.1, β = 1.0, τ =
 - **Watch item (not pre-fixed):** V4 fell below τ by 50k steps and the term went inert for 92% of training (notes §9 #6). Log the fraction of steps with L_est_t+1 > τ on every update.
 - **Scale note:** the paper's Table IV RMSEs (0.47 m, 0.59 m/s) imply L_est ≈ 0.28 ≫ τ, so the term should be active in this task's scale (2–8 m altitude). V4's estimator ran at a much smaller error scale.
 
+### Block 13 built (1 Oct 2026): `policies/active_perception.py`, `tests/test_block13_active.py`, 8/8 pass
+
+- **Formula:** r_active_t = −0.1 · clip(1.0 · (L_est_{t+1} − 0.01), 0, 1), where L_est_{t+1} is the Eq. 1 loss of the estimate the policy produced during the rollout for the observation at t+1 (current parameters, detached).
+  - **Last rollout step:** the estimate for the next observation is computed without advancing the LSTM. A test checks that it equals the estimate the next rollout actually produces.
+  - **Done steps** (terminated or truncated): r_active = 0, because the next observation belongs to a new episode [unspecified].
+- **Integration:**
+  - Added to the env reward before GAE; the test recomputes GAE from rewards + r_active.
+  - Recomputed independently from a recorded vision rollout across forced episode boundaries (horizon 5), with every (t, b) matching to 1e-6.
+- **Switch:** `train_ppo.py --r-active {auto, off}`.
+  - auto = on for vision with λ_est > 0 (proposed method A); off = A-noAP.
+  - It is never used by variant P or A-noEst (λ_est = 0).
+  - Recorded as `r_active_used` in config.json.
+- **Logging:**
+  - `updates.csv` gains `r_active_frac`: the fraction of live steps with L_est_{t+1} > τ (the V4 "inert term" watch item); `r_active_mean` was already logged.
+  - The console line shows `ra <frac>/<mean>`.
+- **Watch item, saturation early in training.** An untrained estimator has L_est ≈ 6.5 (test rollout). So r_active saturates at −0.1 on every live step, acting as a time penalty: the discounted sum over a 300-step horizon is ≈ −9.5, comparable to the −10 crash penalty. It stops being a constant once L_est < 1.01. The paper's Table IV RMSEs imply L_est ≈ 0.3 at convergence (r_active ≈ −0.03 per step). Log and watch; do not pre-fix.
+
 ## 12. Build and verification order (tests in `v5_shin/tests/`)
 
 | # | Component | Pass criterion |
@@ -570,7 +587,7 @@ r_active_t = −α · [β (L_est_t+1 − τ)]_0^1, with α = 0.1, β = 1.0, τ =
 | 10 | Curriculum | **DONE 30 Sep: 9/9** (§7) |
 | 11 | Network | **DONE 30 Sep: 10/10** (§10), 5.85M params |
 | 12 | PPO + L_est | **BUILT 30 Sep: 10/10 CPU tests**; GPU fit check and smoke run need approval |
-| 13 | r_active | hand-computed on a recorded rollout |
+| 13 | r_active | **BUILT 1 Oct: `policies/active_perception.py`, 8/8 tests** (§11.3); no training run yet |
 | 14 | Evaluation script | **BUILT 30 Sep: `scripts/evaluate.py`, 3/3 tests**: per-episode seeds 9000 + i (gains re-drawn), deterministic mean actions, worker-count independent (tested), Wilson 95% CI, strict success, impact speed, vision est RMSE + blind-age bins |
 | 15 | PACMAN keypoint pad | single change, after the above |
 

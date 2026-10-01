@@ -28,6 +28,7 @@ from v5_shin.envs.curriculum import Curriculum
 from v5_shin.envs.dr import DRConfig
 from v5_shin.envs.reward import ShinReward
 from v5_shin.envs.shin_env import VZ_MAX_DEFAULT, ShinLandingEnv
+from v5_shin.policies.active_perception import ActivePerceptionReward
 from v5_shin.policies.ppo import PPOConfig, PPOTrainer
 
 RUNS = os.path.join(os.path.dirname(__file__), "..", "runs")
@@ -92,6 +93,9 @@ def main():
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--lambda-est", type=float, default=1.0, help="0 = w/o state estimation")
     ap.add_argument("--vz-penalty", choices=["literal", "prose"], default="literal")
+    ap.add_argument("--r-active", choices=["auto", "off"], default="auto",
+                    help="active-perception reward (Block 13): auto = on for vision with "
+                         "lambda_est > 0 (proposed method); off = A-noAP. Never used by variant P")
     ap.add_argument("--vz-max", type=float, default=VZ_MAX_DEFAULT,
                     help="vertical-speed action limit (m/s); D16 default 1.0 (P_smoke_s1 used 3.0)")
     ap.add_argument("--motor", choices=["asym", "sym_slow", "sym_fast"], default="asym",
@@ -116,7 +120,9 @@ def main():
     cur = Curriculum(start_level=a.start_level)
     venv = make_venv(a.mode, a.n_envs, a.seed, a.renderer, a.vz_penalty, cur.c, vz_max=a.vz_max,
                      motor_mode=a.motor)
-    tr = PPOTrainer(venv, cfg, device=a.device, total_updates=total_updates)
+    use_ra = a.r_active == "auto" and a.mode == "vision" and cfg.lambda_est > 0
+    tr = PPOTrainer(venv, cfg, device=a.device, total_updates=total_updates,
+                    r_active_fn=ActivePerceptionReward() if use_ra else None)
     if a.resume:
         d = torch.load(os.path.join(run, "latest.pt"), map_location=a.device, weights_only=False)
         extra = tr.load_state_dict(d)
@@ -125,6 +131,7 @@ def main():
     if not a.resume or not os.path.exists(os.path.join(run, "config.json")):
         with open(os.path.join(run, "config.json"), "w") as f:
             json.dump(dict(vars(a), micro_chunks_used=micro, total_updates=total_updates,
+                           r_active_used=use_ra,
                            ppo=vars(cfg), host=pyplatform.node(), torch=torch.__version__,
                            gymnasium=gym.__version__,
                            gpu=(torch.cuda.get_device_name(0) if torch.cuda.is_available() else None)),
@@ -164,6 +171,7 @@ def main():
                        ep_len_mean=(float(np.mean([e["t"] for e in eps])) if eps else None),
                        reward_mean=float(buf["rewards"].mean()),
                        r_active_mean=float(buf["r_active"].mean()),
+                       r_active_frac=buf.get("r_active_frac"),
                        **stats)
             if a.mode == "vision":
                 row.update(tr.estimate_error_by_blind_age(buf))
@@ -173,7 +181,10 @@ def main():
                   f"crash {outc.count('crash_ground') + outc.count('crash_platform'):3d} "
                   f"tilt {outc.count('tilt'):2d} drift {outc.count('drift'):3d} "
                   f"to {outc.count('timeout'):3d} | kl {stats['kl']:.4f} ev {stats['explained_var']:.2f} "
-                  f"est {stats['est']:.3f} | {row['sps']:.0f} sps", flush=True)
+                  f"est {stats['est']:.3f}"
+                  + (f" ra {row['r_active_frac']:.2f}/{row['r_active_mean']:+.4f}"
+                     if row["r_active_frac"] is not None else "")
+                  + f" | {row['sps']:.0f} sps", flush=True)
             extra = dict(curriculum=cur.state_dict())
             if tr.update % a.ckpt_every == 0 or tr.update == total_updates:
                 torch.save(tr.state_dict(extra), os.path.join(run, f"u{tr.update:05d}.pt"))
