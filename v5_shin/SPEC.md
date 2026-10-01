@@ -38,6 +38,7 @@ V5 does not import from or copy V1–V4 code (`src/envs`, `src/policies`,
 | D15 | Collision geometry / success region (§9, Block 4) | **DECIDED 30 Sep: keep the paper's definition (pad-top contact) with the AerialGym 0.5 m box; also report strict success (`com_over_pad`) in every evaluation.** |
 | D16 | Vertical-speed action limit (§5) | **DECIDED 30 Sep, after P_smoke_s1: v_z limit ±1 m/s** (was ±3, [unspecified]). The paper's Fig. 9 shows descents of ≲ 1 m/s in every scenario; with ±3 the privileged policy dived at ~4.1 m/s impact. Env parameter `vz_max` (default 1.0); `reward_profile.py` keeps 3.0 because it studies the reward, not the limit. |
 | D17 | D3 re-test under the ±1 m/s limit (§6, §15) | **PROPOSED 1 Oct, pending owner confirmation: keep the literal D3.** One prose run (P_smoke_prose_vz1_s1) was tested against the literal run under D16. Under prose the curriculum never left L10 in 2M steps; the run lost the success-rate comparison (30.5% vs 81.5% pinned at c = 1), gained 337/1000 tilt crashes, and still touched down at −1.66 m/s median. The touchdown speed is set by the thrust-deficit sink, not by the reward sign (§15). |
+| D18 | Renderer for vision training on the 4 GB T400 | **DECIDED 1 Oct (measured): TinyRenderer (CPU), 16 envs × 256 steps, PPO update on the GPU (micro 8).** Each EGL env holds ~250 MB of GPU memory (1/4/8/16 envs: +252/+1005/+2009/+3658 MiB of 3715), so 16 EGL envs + training does not fit; the first A smoke run crashed out of memory. 8 EGL × 512 steps would fit only with ~0.3 GB to spare and is no faster overall: the update dominates (33.5 s at micro 8, peak 1.82 GiB; 37.8 s at micro 4, 1.06 GiB). Rollout: tiny 16 envs 194 steps/s vs EGL 8 envs 266. Tiny images were validated in Block 3 (corner error ≤ 1.6 px) and the Block 6 visual-DR tests run under both renderers. Evaluation of vision runs must use the same renderer (`--renderer tiny`). |
 | D14 | Training seeds per configuration | **ACCEPTED:** 3 for configurations that are reported; 1 for exploratory runs. |
 
 ---
@@ -775,3 +776,25 @@ Pinned evaluation: `latest.pt`, 2,002,944 steps, c = 1.0, 1,000 episodes, seed b
   - Gentle landing is physically possible in this task: the oracle lands at −0.62 m/s at c = 1.
 - **Success:** sym_slow-trained 89.7% vs asym-trained 81.5% (in-distribution), and 92.7% when the sym_slow policy is flown on asym motors. This is one seed each; D14 requires 3 seeds before any difference is claimed.
 - **Implication for the reproduction:** touchdown speed is a property of the paper's task definition (reward + success criterion), not a simulator bug to fix. Keep the paper's motors (asym), and report safe success alongside the paper's metric. A safe-landing variant (an impact-speed condition or penalty) is a separate single-change experiment, after the reproduction.
+
+### A_smoke_s1 (1 Oct 2026): configuration A (vision), plumbing smoke run, 100k steps
+
+- **Config:**
+  - Commit `6e18d4b`. Vision mode: ArUco + CNN + LSTM + L_est (λ 1) + r_active (auto → on).
+  - asym motors, literal D3, ±1 m/s, full DR, curriculum from L10, seed 1.
+  - TinyRenderer (D18), 16 × 256 steps, micro-batch 8, GPU.
+  - 25 updates (102,400 steps).
+- **Result: everything runs.**
+  - No out-of-memory crash.
+  - **57 steps/s overall** (~72 s per update), so 1M steps ≈ 4.9 h.
+- **L_est (training minibatch mean)** falls steadily: 4.62 → 3.35 → 1.95 → 1.47 → 1.12 → 0.93 → 0.82 (u1, 2, 5, 8, 16, 18, 25).
+- **r_active:**
+  - Active on 100% of live steps throughout. τ = 0.01 is far below the current error, and at the paper's own error scale (L_est ≈ 0.3) it would stay ~100% too.
+  - Mean −0.096 → −0.059 per step, falling with L_est. It saturated (−0.1) only while L_est > 1.01, i.e. the first ~17 updates.
+- **Behaviour:**
+  - Success per update 6/157 → 42/205 (4% → 20%).
+  - Crashes dominate: ~145 per update.
+  - Tilt crashes are rising slowly (2 → 17 per update).
+  - Zero timeouts and zero drift. The curriculum stays at L10 (window success ≈ 0.2).
+  - Explained variance 0.0 → 0.3–0.5.
+- **What this does NOT establish:** whether A learns the task. 100k steps is ~5% of where variant P reached L80 (~0.5M steps).
