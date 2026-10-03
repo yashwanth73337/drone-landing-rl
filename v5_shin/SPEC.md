@@ -798,3 +798,46 @@ Pinned evaluation: `latest.pt`, 2,002,944 steps, c = 1.0, 1,000 episodes, seed b
   - Zero timeouts and zero drift. The curriculum stays at L10 (window success ≈ 0.2).
   - Explained variance 0.0 → 0.3–0.5.
 - **What this does NOT establish:** whether A learns the task. 100k steps is ~5% of where variant P reached L80 (~0.5M steps).
+
+### A_s1 (1–3 Oct 2026): configuration A (vision), seed 1, 4M steps
+
+- **Config:**
+  - Commit `e57b93c`. Vision: ArUco + CNN + LSTM + L_est (λ 1) + r_active (on).
+  - asym motors, literal D3, v_z ±1 m/s (verified in config.json), full DR.
+  - TinyRenderer (D18), 16 × 256, micro-batch 8, GPU.
+  - 977 updates, 20.0 h, ~56 steps/s.
+- **Curriculum:** L10 → L20 at ~1.1M steps, L30 ~2.6M, L40 ~3.2M, L50 ~3.9M. **It did not reach L80 (c = 1).** The final window was 0.83 at L50, so it was about to promote.
+  - For comparison, variant P reached L80 at ~0.5M steps.
+  - A used ~176k episodes, more than the paper's entire Fig. 5 span.
+- **Training-time L_est** at each level: 0.07–0.12 (L10–L20), 0.15–0.22 (L30), 0.2–0.26 (L40), 0.35–0.5 (L50).
+- **r_active:** active on 98–100% of live steps; mean −0.006 to −0.026 per step.
+- **Tilt** stayed low (0–20 per update).
+- **Impact v_z mean in training:** −3.6 to −4.7 m/s throughout.
+
+Pinned evaluation: `latest.pt` at 4,001,792 steps, 1,000 episodes, seed base 9000, deterministic, renderer tiny, asym motors. The variant P rows use `P_smoke_vz1_s1/latest.pt` (2,002,944 steps, trained to L80) on the same seeds.
+
+| c | P success / strict | A success / strict | A − P | A ground / platform / tilt / drift / timeout | A est RMSE pos / vel | P impact v_z median (cmd last 5) | A impact v_z median (cmd last 5) | A safe ≤ 1 m/s |
+|---|---|---|---|---|---|---|---|---|
+| 0.125 | 100.0% / 98.7% | 93.4% / 85.2% | −6.6 | 29 / 35 / 2 / 0 / 0 | 0.31 m / 0.86 m/s | −1.73 (−0.47) | −4.06 (−0.48) | 0.000 |
+| 0.5 | 99.0% / 93.2% | 88.8% / 75.6% | −10.2 | 65 / 38 / 4 / 5 / 0 | 0.84 / 0.93 | −2.01 (−0.39) | −3.79 (−0.53) | 0.000 |
+| 0.625 (A's last level) | 97.5% / 88.5% | 82.2% / 67.1% | −15.3 | 92 / 72 / 6 / 8 / 0 | 1.37 / 1.12 | −2.10 (−0.36) | −3.62 (−0.52) | 0.004 |
+| 1.0 (A untrained) | 81.5% / 68.6% | 48.5% / 38.1% | −33.0 | 301 / 90 / 7 / 117 / 0 | 4.36 / 2.58 | −2.30 (−0.31) | −3.47 (−0.52) | 0.003 |
+
+A's mean position-estimate error by blind age (visible / 1–15 / 16–60 / 61–120 steps):
+
+| c | visible | 1–15 | 16–60 | 61–120 |
+|---|---|---|---|---|
+| 0.125 | 0.18 m | 0.36 m | 1.11 m (n 30) | — |
+| 0.5 | 0.20 m | 0.51 m | 3.01 m (n 500) | — |
+| 1.0 | 1.14 m | 2.64 m | 6.73 m (n 3,616) | 11.1 m (n 43) |
+
+**Readings** (one seed each; preliminary):
+
+- **Control is not the bottleneck at c ≤ 0.625.**
+  - With the true state, the same PPO / reward / curriculum lands 97.5–100%.
+  - With vision, A loses 7–15 points, and the gap grows with c in step with A's estimation error (0.31 → 0.84 → 1.37 m).
+  - This points to the STATE side, especially estimation during blind stretches (pad out of view). It is not yet a clean separation: A's policy was also learned on its own estimates (see the next diagnostic).
+- **At c = 0.5, A's estimation error (0.84 m / 0.93 m/s) is close to the paper's for this configuration** ("w/o keypoint encoder": 0.953 m / 1.063 m/s). The paper's 91% success, however, is at c = 1, which A never trained on.
+- **Learning speed:** vision progressed ~8× slower through the curriculum than variant P, and had not finished after 4M steps.
+- **A touches down at −3.5 to −4.1 m/s** while commanding about −0.5 m/s near touchdown, far faster than P (−1.7 to −2.3) on the same motors and cap. The mechanism is unverified; candidates are jittery vision actions amplifying the asym-motor sink, and tilt.
+- **Safe landing (≤ 1 m/s) is ~0% at every c.**
