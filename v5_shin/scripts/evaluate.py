@@ -19,6 +19,11 @@ Motor time constants (--motor): asym (AerialGym LMF2) | sym_slow (spin-down tau 
   without the key were trained with asym). Only the time constants change; every RNG stream and
   pinned episode is the same. The output folder gets a _<motor> suffix unless motor is asym.
 
+True-state injection (--inject-true-state, vision only, evaluation diagnostic): the decision
+  layer gets the TRUE relative state in place of the estimate y[0:6]; everything else (image,
+  LSTM, the other 250 latent dims) is unchanged. Estimate metrics still report the estimator.
+  Output folder suffix: _injtrue.
+
 Usage:
   python -m v5_shin.scripts.evaluate --run P_smoke_s1 --ckpt latest.pt --episodes 1000 --c 1.0
   python -m v5_shin.scripts.evaluate --run P_smoke_vz1_s1 --c 1.0 --motor sym_slow
@@ -53,7 +58,7 @@ def wilson(k, n, z=1.96):
 
 
 def _worker(args):
-    ckpt_path, cfg, seeds, c, stochastic, renderer, motor = args
+    ckpt_path, cfg, seeds, c, stochastic, renderer, motor, inject = args
     from v5_shin.envs.reward import ShinReward
     from v5_shin.envs.shin_env import ShinLandingEnv
     from v5_shin.policies.shin_policy import ShinPolicy
@@ -82,7 +87,7 @@ def _worker(args):
                 tob = {kk: torch.as_tensor(np.asarray(obs[kk]))[None] for kk in keys}
                 with torch.no_grad():
                     mu, s_est, state = pol.actor_seq({kk: v[None] for kk, v in tob.items()}, state,
-                                                     start[None])
+                                                     start[None], inject_true_state=inject)
                     mu = mu[0, 0]
                     if stochastic:
                         a = mu + pol.log_std.exp() * torch.randn(mu.shape, generator=g)
@@ -116,16 +121,19 @@ def _worker(args):
 
 
 def evaluate(run, ckpt, episodes=1000, c=1.0, seed_base=9000, workers=8, stochastic=False,
-             renderer="tiny", out=None, motor=None):
+             renderer="tiny", out=None, motor=None, inject_true_state=False):
     run_dir = os.path.join(RUNS, run)
     cfg = json.load(open(os.path.join(run_dir, "config.json")))
     trained_motor = cfg.get("motor", "asym")
     motor = motor or trained_motor
     if motor not in MOTOR_MODES:
         raise ValueError(f"motor {motor!r} not in {MOTOR_MODES}")
+    if inject_true_state and cfg["mode"] != "vision":
+        raise ValueError("--inject-true-state needs a vision run (variant P already sees the true state)")
     seeds = [seed_base + i for i in range(episodes)]
     chunks = [seeds[i::workers] for i in range(workers) if seeds[i::workers]]
-    args = [(os.path.join(run_dir, ckpt), cfg, ch, c, stochastic, renderer, motor) for ch in chunks]
+    args = [(os.path.join(run_dir, ckpt), cfg, ch, c, stochastic, renderer, motor, inject_true_state)
+            for ch in chunks]
     t0 = time.time()
     if len(args) == 1:
         res = [_worker(args[0])]
@@ -143,7 +151,7 @@ def evaluate(run, ckpt, episodes=1000, c=1.0, seed_base=9000, workers=8, stochas
     summ = dict(run=run, ckpt=ckpt, timestep=None, c=c, episodes=n, seed_base=seed_base,
                 policy="stochastic" if stochastic else "deterministic(mean)", renderer=renderer,
                 vz_max=cfg.get("vz_max", 3.0), mode=cfg["mode"], motor=motor,
-                trained_motor=trained_motor,
+                trained_motor=trained_motor, inject_true_state=bool(inject_true_state),
                 success_rate=oc["success"] / n, success_ci95=wilson(oc["success"], n),
                 strict_success_rate=strict / n, strict_ci95=wilson(strict, n), outcomes=oc,
                 impact_vz_median=float(np.median(vz)), impact_vz_p10=float(np.percentile(vz, 10)),
@@ -174,6 +182,8 @@ def evaluate(run, ckpt, episodes=1000, c=1.0, seed_base=9000, workers=8, stochas
     tag = f"eval_{os.path.splitext(ckpt)[0]}_c{c}_s{seed_base}_{'sto' if stochastic else 'det'}"
     if motor != "asym":
         tag += f"_{motor}"
+    if inject_true_state:
+        tag += "_injtrue"
     out = out or os.path.join(run_dir, tag)
     os.makedirs(out, exist_ok=True)
     with open(os.path.join(out, "episodes.csv"), "w", newline="") as f:
@@ -195,13 +205,15 @@ def main():
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--stochastic", action="store_true")
     ap.add_argument("--renderer", choices=["tiny", "egl"], default="tiny")
+    ap.add_argument("--inject-true-state", action="store_true",
+                    help="vision only: feed the decision layer the true s_rel instead of the estimate")
     ap.add_argument("--motor", choices=MOTOR_MODES, default=None,
                     help="motor time constants (default: as trained, from config.json)")
     a = ap.parse_args()
     for c in a.c:
         s, _ = evaluate(a.run, a.ckpt, a.episodes, c, a.seed_base, a.workers, a.stochastic, a.renderer,
-                        motor=a.motor)
-        show = {k: s[k] for k in ("run", "ckpt", "timestep", "c", "episodes", "policy", "motor", "trained_motor",
+                        motor=a.motor, inject_true_state=a.inject_true_state)
+        show = {k: s[k] for k in ("run", "ckpt", "timestep", "c", "episodes", "policy", "motor", "trained_motor", "inject_true_state",
                                   "success_rate", "success_ci95", "strict_success_rate", "outcomes",
                                   "impact_vz_median", "impact_vz_p10", "impact_vz_p90",
                                   "cmd_vz_last5_median", "safe_success", "safe_strict_success",

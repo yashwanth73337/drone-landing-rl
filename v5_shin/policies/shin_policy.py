@@ -68,9 +68,13 @@ class ShinPolicy(nn.Module):
         return self.critic(critic_obs / self.critic_scale).squeeze(-1)
 
     # ---- actor over a sequence --------------------------------------------------------
-    def actor_seq(self, obs, state, episode_starts):
+    def actor_seq(self, obs, state, episode_starts, inject_true_state=False):
         """obs: dict of (T, B, ...) tensors; episode_starts: (T, B) float (1 = new episode at t).
-        Returns mu (T, B, A), s_est (T, B, 6) or None, new state."""
+        Returns mu (T, B, A), s_est (T, B, 6) or None, new state.
+
+        inject_true_state (EVALUATION DIAGNOSTIC ONLY, vision): the decision layer receives
+        y with y[0:6] replaced by the TRUE s_rel (obs["target"]); the other 250 latent dims are
+        unchanged. The returned s_est is still the estimator's own output. Never used in training."""
         u = obs["u"]
         T, B = u.shape[:2]
         if self.mode == "privileged":
@@ -87,7 +91,8 @@ class ShinPolicy(nn.Module):
             hs.append(out[0])
         hseq = torch.stack(hs)
         y = self.est(torch.cat([l, hseq, u], -1))
-        mu = self.dec(torch.cat([y, u], -1))
+        y_dec = torch.cat([obs["target"], y[..., S_DIM:]], -1) if inject_true_state else y
+        mu = self.dec(torch.cat([y_dec, u], -1))
         return mu, y[..., :S_DIM], (h, c)
 
     def dist(self, mu):

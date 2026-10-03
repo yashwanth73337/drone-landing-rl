@@ -841,3 +841,36 @@ A's mean position-estimate error by blind age (visible / 1–15 / 16–60 / 61�
 - **Learning speed:** vision progressed ~8× slower through the curriculum than variant P, and had not finished after 4M steps.
 - **A touches down at −3.5 to −4.1 m/s** while commanding about −0.5 m/s near touchdown, far faster than P (−1.7 to −2.3) on the same motors and cap. The mechanism is unverified; candidates are jittery vision actions amplifying the asym-motor sink, and tilt.
 - **Safe landing (≤ 1 m/s) is ~0% at every c.**
+
+### State-vs-control diagnostics on A_s1 (3 Oct 2026): evaluation only
+
+- **Tool:** `evaluate.py --inject-true-state` (`policies/shin_policy.py actor_seq(inject_true_state=True)`).
+  - The decision layer gets y with y[0:6] replaced by the TRUE s_rel; the image, LSTM and the other 250 latent dims are unchanged.
+  - Tests: `tests/test_diag_inject.py` (2); 175 pass.
+- **Run:** checkpoint `A_s1/latest.pt` (4,001,792 steps), 1,000 episodes, seed base 9000, deterministic, renderer tiny. P = `P_smoke_vz1_s1/latest.pt`.
+
+| c | P (true state) | A (own estimate) | A + true state injected | gap recovered by injection | A on sym_fast motors |
+|---|---|---|---|---|---|
+| 0.5 | 99.0% [98.2, 99.5] | 88.8% [86.7, 90.6] | 89.1% [87.0, 90.9] | 0.3 of 10.2 pts (~0%) | 44.6% (395 drift, impact −1.58) |
+| 0.625 | 97.5% [96.3, 98.3] | 82.2% [79.7, 84.4] | 86.4% [84.1, 88.4] | 4.2 of 15.3 pts (~27%) | — |
+| 1.0 | 81.5% [79.0, 83.8] | 48.5% [45.4, 51.6] | 54.8% [51.7, 57.9] | 6.3 of 33.0 pts (~19%) | 15.1% (739 drift, impact −1.73) |
+
+Injected-run failure counts (ground / platform / tilt / drift / timeout):
+
+| c | A | A + inject |
+|---|---|---|
+| 0.5 | 65 / 38 / 4 / 5 / 0 | 52 / 50 / 4 / 3 / 0 |
+| 0.625 | 92 / 72 / 6 / 8 / 0 | 68 / 60 / 2 / 6 / 0 |
+| 1.0 | 301 / 90 / 7 / 117 / 0 | 300 / 80 / 6 / 66 / 0 |
+
+**Readings** (one seed; preliminary):
+
+- **Correcting the explicit estimate recovers little of the vision gap**: ~0% at c = 0.5, ~20–27% at c = 0.625–1.0.
+  - Most of the gap to P remains even when A's decision layer is handed the true relative state.
+  - So, in this test, A's shortfall is mainly in the controller learned under vision, not in the explicit estimate s̃. That points at the **control / training side**.
+  - At c = 1.0 injection does halve the drift failures (117 → 66), so the estimate matters more where the pad is lost for long stretches.
+- **Limits of the test:**
+  - (1) The decision layer also reads 250 other latent dims computed from vision, which may carry (imperfect) state information. Injection removes error only in the explicit channel.
+  - (2) The decision layer never saw true-state inputs in training. Near the estimate's accuracy, that is a small shift.
+  - (3) P was trained to L80; A only to L50.
+- **A's 4 m/s touchdowns are the actuator sink exploit, amplified.** With fast symmetric motors, A's impact drops to −1.6 / −1.7 m/s, but success collapses: 395 / 739 episodes drift away (vs 136 timeouts for P under the same motors). A's controller depends on the asymmetric motor sink to come down even more than P's.
