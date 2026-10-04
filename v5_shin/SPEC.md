@@ -874,3 +874,56 @@ Injected-run failure counts (ground / platform / tilt / drift / timeout):
   - (2) The decision layer never saw true-state inputs in training. Near the estimate's accuracy, that is a small shift.
   - (3) P was trained to L80; A only to L50.
 - **A's 4 m/s touchdowns are the actuator sink exploit, amplified.** With fast symmetric motors, A's impact drops to −1.6 / −1.7 m/s, but success collapses: 395 / 739 episodes drift away (vs 136 timeouts for P under the same motors). A's controller depends on the asymmetric motor sink to come down even more than P's.
+
+### P seeds 2–3 and A_noEst_s1 (3–4 Oct 2026)
+
+- **Runs:**
+  - `P_smoke_vz1_s2`, `P_smoke_vz1_s3`: identical to `P_smoke_vz1_s1` except the seed. Both reached L80 in 2M steps (~0.4 h each).
+  - `A_noEst_s1`: identical to A_s1 except `--lambda-est 0`. This disables r_active automatically; LSTM and estimation MLP are kept but never supervised. 4M steps, 19.9 h. **It never left L10.**
+- **Pinned evaluation:** `latest.pt` of each run, 1,000 episodes, seed base 9000, deterministic; vision runs with renderer tiny; asym motors.
+
+| c | P s1 | P s2 | P s3 | P mean (range) | A_s1 | A_noEst_s1 |
+|---|---|---|---|---|---|---|
+| 0.125 | 100.0% | 100.0% | 99.7% | 99.9% | 93.4% | **25.2%** [22.6, 28.0] |
+| 0.5 | 99.0% | 99.2% | 99.3% | 99.2% (0.3) | 88.8% | **7.9%** [6.4, 9.7] |
+| 0.625 | 97.5% | 97.6% | 97.1% | 97.4% (0.5) | 82.2% | **7.1%** [5.7, 8.9] |
+| 1.0 | 81.5% | 89.9% | 83.8% | 85.1% (8.4) | 48.5% | **4.5%** [3.4, 6.0] |
+
+Strict success at c = 1, by seed (s1 / s2 / s3):
+
+| run | strict |
+|---|---|
+| P | 68.6 / 75.5 / 70.3% |
+| A_s1 | 38.1% |
+| A_noEst_s1 | 2.6% |
+
+Impact v_z median at c = 1:
+
+| run | impact v_z median |
+|---|---|
+| P | −2.30 / −2.08 / −2.16 |
+| A_s1 | −3.47 |
+| A_noEst_s1 | −5.02 |
+
+A_noEst_s1 failure counts (ground / platform / tilt / drift / timeout):
+
+| c | failures |
+|---|---|
+| 0.125 | 524 / 56 / 168 / 0 / 0 |
+| 1.0 | 693 / 11 / 201 / 50 / 0 |
+
+Its "est RMSE" (4.9–7.0 m) is meaningless: the head is unsupervised.
+
+**Readings:**
+
+- **The control ceiling is stable across seeds.**
+  - P lands 99–100% up to c = 0.625 with < 1 pt spread.
+  - At c = 1, P lands 81.5–89.9% (mean 85.1%): the full task is harder for control too, and seed variation is ~8 pts there.
+- **Without the estimation loss, vision does not learn.**
+  - A_noEst stays at L10 for 4M steps and lands only 25% even at the level it trained on. Ground crashes and tilt dominate.
+  - With L_est, A reaches L50 and lands 93% at c = 0.125.
+  - Same direction as the paper ("removing the learned state estimator prevents reliable curriculum progression"; 73.99% vs 91%), but much larger here: 4.5% vs 48.5% at c = 1. One plausible reason: on the ArUco base the CNN has no pretrained keypoint features, so the state supervision is the main signal shaping the representation. Untested.
+- **Combined with the injection test, this refines the state-vs-control reading:**
+  - (1) Learning to extract the relative state from images is the hard, essential part. Without explicit state supervision, PPO alone does not learn it here: a STATE / representation-learning problem during training.
+  - (2) Once A is trained with L_est, correcting its explicit 6-number estimate at test time recovers little of its remaining gap to P (0–27%). The residual gap lies in what the vision-trained network does with its representation, not in the explicit estimate.
+  - Both one-seed for vision.
