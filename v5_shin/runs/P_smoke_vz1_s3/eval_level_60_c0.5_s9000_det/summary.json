@@ -1,0 +1,53 @@
+{
+  "run": "P_smoke_vz1_s3",
+  "ckpt": "level_60.pt",
+  "timestep": 606208,
+  "c": 0.5,
+  "episodes": 1000,
+  "seed_base": 9000,
+  "policy": "deterministic(mean)",
+  "renderer": "tiny",
+  "vz_max": 1.0,
+  "mode": "privileged",
+  "motor": "asym",
+  "trained_motor": "asym",
+  "inject_true_state": false,
+  "success_rate": 0.955,
+  "success_ci95": [
+    0.940316857129231,
+    0.9662006651571536
+  ],
+  "strict_success_rate": 0.822,
+  "strict_ci95": [
+    0.7970726977903041,
+    0.8444627795200604
+  ],
+  "outcomes": {
+    "success": 955,
+    "crash_ground": 29,
+    "crash_platform": 14,
+    "tilt": 2,
+    "drift": 0,
+    "timeout": 0
+  },
+  "impact_vz_median": -1.6074022967801371,
+  "impact_vz_p10": -2.259051464600873,
+  "impact_vz_p90": -1.0679887086265407,
+  "impact_speed_median": 2.045439818965622,
+  "steps_to_land_median": 30.0,
+  "safe_success": {
+    "<=0.5": 0.0,
+    "<=1.0": 0.064,
+    "<=1.5": 0.377,
+    "<=2.0": 0.754
+  },
+  "safe_strict_success": {
+    "<=0.5": 0.0,
+    "<=1.0": 0.05,
+    "<=1.5": 0.314,
+    "<=2.0": 0.637
+  },
+  "cmd_vz_last5_median": 0.19405148923397064,
+  "wall_s": 8.8,
+  "update": 148
+}

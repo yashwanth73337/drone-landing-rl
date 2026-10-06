@@ -963,3 +963,31 @@ The share never exceeds 27%. A's estimation RMSE at c = 0.5 by seed: 0.84 / 0.68
   - (2) Once trained, the remaining gap is mostly not in the explicit 6-number estimate.
   - The open caveat remains: injection does not correct state information carried in the other 250 latent dims.
 - **Confound to remove next:** P finished the curriculum; A did not. A curriculum-matched comparison uses P's `level_50.pt` / `level_30.pt` checkpoints (saved at first promotion to that level). Evaluation only.
+
+### Curriculum-matched comparison (6 Oct 2026): evaluation only
+
+- **Question:** P finished the curriculum (L80); A did not (L50 / L50 / L30). Is A's gap a vision cost, or just less training progress?
+- **Method:** evaluate P's checkpoints saved at the first update of a new level, i.e. trained through the level before:
+  - `level_60.pt`: trained through L50, matching A_s1 and A_s2.
+  - `level_40.pt`: trained through L30, matching A_s3.
+- **Run:** P seeds 1–3, same pinned 1,000 episodes (seed base 9000, deterministic).
+
+| c | P level_60 (s1 / s2 / s3, mean) | A_s1 / A_s2 at L50 (mean) | P level_40 (s1 / s2 / s3, mean) | A_s3 at L30 |
+|---|---|---|---|---|
+| 0.5 | 76.2 / 92.2 / 95.5 (**88.0**) | 88.8 / 91.1 (**90.0**) | 66.5 / 86.9 / 79.8 (**77.7**) | 67.9 |
+| 0.625 | 72.9 / 85.4 / 93.6 (**84.0**) | 82.2 / 83.8 (**83.0**) | 61.9 / 79.0 / 75.9 (**72.3**) | 56.9 |
+| 1.0 | 59.7 / 72.3 / 80.0 (**70.7**) | 48.5 / 52.4 (**50.5**) | 50.9 / 62.4 / 64.2 (**59.2**) | 34.7 |
+
+**Readings:**
+
+- **At the same curriculum stage and within the trained difficulty, vision matches the true-state policy.** At c = 0.5 and 0.625: A 90.0 vs P 88.0, and A 83.0 vs P 84.0. The earlier 17–23-point "gap" at c ≤ 0.625 came mostly from P having trained further.
+- **Beyond the trained difficulty, vision generalises worse.** At c = 1, A at L50 lands 50.5% vs 70.7% for curriculum-matched P (−20 points). There, A's position estimate degrades to ~4 m RMSE, and injection recovers about a third of this matched gap (+6 / +7 points for s1 / s2).
+- **A_s3 vs matched P (L30):** −10 / −15 / −25 points at c = 0.5 / 0.625 / 1.0. One A seed; it is A's weakest seed.
+- **Revised state-vs-control reading:**
+  - The cost of vision appears mainly as **slower learning**, plus **worse generalisation to unseen platform motion**. It does not appear as a lower ceiling at a given training stage.
+  - Learning needs the estimation loss (A-noEst does not learn).
+  - Quantify the learning-speed cost from the checkpoint timesteps: steps for P to reach L60 vs ~3.9M for A.
+- **Caveats:**
+  - A level_XX checkpoint is a snapshot at promotion, not after equal training time.
+  - P's level-matched success varies strongly by seed (e.g. 76–96% at c = 0.5).
+  - A has 2 seeds at L50 and 1 at L30.
