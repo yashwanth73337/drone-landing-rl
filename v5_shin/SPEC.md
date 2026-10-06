@@ -927,3 +927,39 @@ Its "est RMSE" (4.9–7.0 m) is meaningless: the head is unsupervised.
   - (1) Learning to extract the relative state from images is the hard, essential part. Without explicit state supervision, PPO alone does not learn it here: a STATE / representation-learning problem during training.
   - (2) Once A is trained with L_est, correcting its explicit 6-number estimate at test time recovers little of its remaining gap to P (0–27%). The residual gap lies in what the vision-trained network does with its representation, not in the explicit estimate.
   - Both one-seed for vision.
+
+### A seeds 2–3 (4–6 Oct 2026): configuration A with 3 seeds; true-state injection on all three
+
+- **Runs:** `A_s2`, `A_s3`, identical to A_s1 except the seed (4M steps, ~20 h each).
+  - Final curriculum level: **A_s1 L50, A_s2 L50, A_s3 L30.**
+  - P seeds 1–3 all reached L80 in 2M steps.
+- **Evaluation:** pinned (1,000 episodes, seed base 9000, deterministic, renderer tiny, asym motors) at c = 0.125 / 0.5 / 0.625 / 1.0. True-state injection at c = 0.5 / 0.625 / 1.0. Committed in `8d94334`.
+
+| c | P s1 / s2 / s3 | P mean | A s1 / s2 / s3 | A mean | A+inject s1 / s2 / s3 | A+inject mean | gap P−A | gap recovered by injection |
+|---|---|---|---|---|---|---|---|---|
+| 0.125 | 100.0 / 100.0 / 99.7 | 99.9 | 93.4 / 93.8 / 90.1 | 92.4 | — | — | 7.5 | — |
+| 0.5 | 99.0 / 99.2 / 99.3 | 99.2 | 88.8 / 91.1 / 67.9 | 82.6 | 89.1 / 92.4 / 73.0 | 84.8 | 16.6 | 2.2 (13%) |
+| 0.625 | 97.5 / 97.6 / 97.1 | 97.4 | 82.2 / 83.8 / 56.9 | 74.3 | 86.4 / 87.2 / 58.2 | 77.3 | 23.1 | 3.0 (13%) |
+| 1.0 | 81.5 / 89.9 / 83.8 | 85.1 | 48.5 / 52.4 / 34.7 | 45.2 | 54.8 / 59.8 / 36.5 | 50.4 | 39.9 | 5.2 (13%) |
+
+Per-seed share of that seed's gap to the P mean recovered by injection:
+
+| c | s1 | s2 | s3 |
+|---|---|---|---|
+| 0.5 | 3% | 16% | 16% |
+| 0.625 | 27% | 25% | 3% |
+| 1.0 | 19% | 20% | 4% |
+
+The share never exceeds 27%. A's estimation RMSE at c = 0.5 by seed: 0.84 / 0.68 / 0.74 m.
+
+**Readings** (3 seeds for P and A; A-noEst 1 seed):
+
+- **Vision gap to the true-state policy:** 7.5 / 16.6 / 23.1 / 39.9 points at c = 0.125 / 0.5 / 0.625 / 1.0. It grows with platform motion.
+- **Correcting the explicit estimate recovers ~13% of the gap at every c** (3-seed means), and never more than 27% in any seed. The A_s1 finding holds across seeds.
+- **A_s3 is the weakest seed** (L30, so c ≥ 0.5 is beyond its training). Its gap is the largest and injection helps it least. This argues against an estimation-error explanation: a policy limited by its estimate would gain most from injection.
+- **Vision progress through the curriculum varies strongly by seed** (L50 / L50 / L30 in 4M steps); P's does not (L80 × 3 in 2M).
+- **The two-part answer now rests on 3 seeds:**
+  - (1) During learning, explicit state supervision is essential (A-noEst: no learning; 1 seed).
+  - (2) Once trained, the remaining gap is mostly not in the explicit 6-number estimate.
+  - The open caveat remains: injection does not correct state information carried in the other 250 latent dims.
+- **Confound to remove next:** P finished the curriculum; A did not. A curriculum-matched comparison uses P's `level_50.pt` / `level_30.pt` checkpoints (saved at first promotion to that level). Evaluation only.
