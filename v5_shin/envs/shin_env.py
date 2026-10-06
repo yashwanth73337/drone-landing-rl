@@ -51,7 +51,7 @@ class ShinLandingEnv(gym.Env):
 
     def __init__(self, mode="vision", c=1.0, seed=0, renderer="egl", egl=None, dr=None,
                  reward_fn="paper", gains_mode="random", vz_max=VZ_MAX_DEFAULT,
-                 motor_mode="asym"):
+                 motor_mode="asym", gui=False):
         assert mode in ACTOR_KEYS, mode
         self.mode = mode
         self.c = float(c)
@@ -64,7 +64,7 @@ class ShinLandingEnv(gym.Env):
             renderer = "tiny"                      # never used; avoid an EGL context
         egl = (renderer == "egl") if egl is None else egl
         self.sim = LandingSim(renderer=renderer, egl=egl, seed=seed, dr=dr, gains_mode=gains_mode,
-                              motor_mode=motor_mode)      # motor_mode: evaluation diagnostic only
+                              motor_mode=motor_mode, gui=gui)  # motor_mode: eval diagnostic; gui: viewer only
         self.action_scale = action_scale(vz_max)
         f32 = np.float32
         self.observation_space = spaces.Dict({

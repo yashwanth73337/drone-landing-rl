@@ -991,3 +991,14 @@ The share never exceeds 27%. A's estimation RMSE at c = 0.5 by seed: 0.84 / 0.68
   - A level_XX checkpoint is a snapshot at promotion, not after equal training time.
   - P's level-matched success varies strongly by seed (e.g. 76–96% at c = 0.5).
   - A has 2 seeds at L50 and 1 at L30.
+
+### Viewer (6 Oct 2026): `scripts/watch.py`, `tests/test_watch.py` (3); 178 tests pass
+
+- **Two ways to watch landings:**
+  - A live PyBullet 3D window.
+  - `--video FILE.mp4` (10 frames/s): chase view plus the drone's own grayscale camera, with a text overlay.
+- **What it can play:** any trained run (`--run NAME --ckpt FILE`) or the scripted oracle (`--oracle`). It uses the same pinned episodes and deterministic actions as `evaluate.py`, and supports `--motor` and `--inject-true-state`.
+- **The scene is not modified.**
+  - The drone marker in the chase view is drawn on the image only.
+  - The only environment change is a `gui=False` pass-through in `LandingSim` / `ShinLandingEnv`, used only by the viewer.
+- **Check:** the oracle at c = 0.5, seed 9000 lands in 52 steps at −0.61 m/s, as in Block 5.
