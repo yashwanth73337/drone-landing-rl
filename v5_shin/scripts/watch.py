@@ -14,6 +14,11 @@ Episodes are the SAME pinned episodes as evaluate.py: episode i uses seed seed_b
 deterministic (mean) actions, so what you see is what the evaluation counted. The motor model and
 the true-state injection can be switched exactly as in evaluate.py (--motor, --inject-true-state).
 
+Live window: the drone hovers at its start for 1.5 s, then flies in real time (10 ms per
+physics step), with a red trail and a status label (time, height above the pad top h,
+horizontal distance d, vertical speed vz); the outcome is shown for 2.5 s at the end.
+--slow 2 plays at half speed; --hold keeps the window open at the end (for screen recording).
+
 Usage (from ~/mtp/drone-landing-rl):
   python -m v5_shin.scripts.watch --run P_smoke_vz1_s1 --c 1.0 --episodes 3
   python -m v5_shin.scripts.watch --run A_s1 --c 0.5 --episodes 3 --video v5_shin/runs/A_s1/watch_c0.5.mp4
@@ -106,6 +111,72 @@ def frame(sim, title, seed, k, cmd, outcome=None, info=None):
     return np.hstack([left, onboard])
 
 
+class LiveView:
+    """Live 3D window: smooth real-time playback (the window is refreshed after every 10 ms
+    physics step), a camera that follows the drone and the pad, a red trail of the drone's
+    path, a status label above the drone, and pauses at the start and end of each episode.
+    The trail and labels are window-only drawings: the drone's own camera (TinyRenderer)
+    never renders them, so the policy sees exactly what it sees in evaluation."""
+
+    def __init__(self, sim, slow):
+        self.sim, self.slow, self.cid = sim, slow, sim.cid
+        for flag in (p.COV_ENABLE_GUI, p.COV_ENABLE_RGB_BUFFER_PREVIEW,
+                     p.COV_ENABLE_DEPTH_BUFFER_PREVIEW, p.COV_ENABLE_SEGMENTATION_MARK_PREVIEW):
+            p.configureDebugVisualizer(flag, 0, physicsClientId=self.cid)
+        self.prev, self.n, self.ids = None, 0, {}
+        self._orig_step = p.stepSimulation
+        p.stepSimulation = self._step            # this process only; restored in close()
+
+    def close(self):
+        p.stepSimulation = self._orig_step
+
+    def _step(self, *args, **kw):
+        r = self._orig_step(*args, **kw)
+        self.n += 1
+        pos = self.sim.quad.state()["pos"].tolist()
+        if self.prev is not None and self.n % 2 == 0:
+            p.addUserDebugLine(self.prev, pos, [1.0, 0.15, 0.15], 2.0, 0, physicsClientId=self.cid)
+            self.prev = pos
+        self.follow()
+        time.sleep(0.01 * self.slow)
+        return r
+
+    def follow(self):
+        pos = self.sim.quad.state()["pos"]
+        pad = self.sim.plat.pad_center()
+        tgt = 0.7 * pos + 0.3 * pad
+        dist = float(np.clip(2.5 + 0.45 * np.linalg.norm(pos - pad), 3.5, 7.0))
+        p.resetDebugVisualizerCamera(dist, np.degrees(self.sim.plat.psi) - 90.0, -30.0, tgt.tolist(),
+                                     physicsClientId=self.cid)
+
+    def text(self, key, txt, pos, color, size=1.2):
+        kw = {"replaceItemUniqueId": self.ids[key]} if key in self.ids else {}
+        self.ids[key] = p.addUserDebugText(txt, list(pos), color, size, 0, physicsClientId=self.cid, **kw)
+
+    def start_episode(self, title, seed):
+        p.removeAllUserDebugItems(physicsClientId=self.cid)
+        self.ids = {}
+        pos = self.sim.quad.state()["pos"]
+        self.prev = pos.tolist()
+        self.follow()
+        self.text("title", title, pos + [0, 0, 1.1], [0.1, 0.1, 0.1])
+        self.text("status", f"episode seed {seed}: start", pos + [0, 0, 0.7], [0.1, 0.1, 0.8])
+        time.sleep(1.5 * self.slow)              # show the drone hovering at its start point
+
+    def status(self, k, cmd_vz):
+        s = self.sim.quad.state()
+        rel = s["pos"] - self.sim.plat.pad_center()
+        self.text("title", self.title_txt, s["pos"] + [0, 0, 1.1], [0.1, 0.1, 0.1])
+        self.text("status", f"t {k * 0.1:4.1f} s  h {rel[2]:4.1f} m  d {np.hypot(rel[0], rel[1]):4.1f} m  "
+                            f"vz {s['v'][2]:+4.1f} m/s", s["pos"] + [0, 0, 0.7], [0.1, 0.1, 0.8])
+
+    def end_episode(self, outcome, vz):
+        good = outcome == "success"
+        self.text("status", f"{(outcome or 'stopped').upper()}   touchdown {vz:+.2f} m/s",
+                  self.sim.quad.state()["pos"] + [0, 0, 0.7], [0.0, 0.6, 0.0] if good else [0.85, 0.0, 0.0], 1.6)
+        time.sleep(2.5 * self.slow)
+
+
 def main():
     ap = argparse.ArgumentParser()
     g = ap.add_mutually_exclusive_group(required=True)
@@ -120,6 +191,7 @@ def main():
     ap.add_argument("--motor", choices=["asym", "sym_slow", "sym_fast"], default=None)
     ap.add_argument("--inject-true-state", action="store_true")
     ap.add_argument("--max-steps", type=int, default=300)
+    ap.add_argument("--hold", action="store_true", help="live window: keep it open at the end until Enter")
     a = ap.parse_args()
 
     from v5_shin.envs.reward import ShinReward
@@ -140,8 +212,9 @@ def main():
     env = ShinLandingEnv(mode=cfg["mode"], renderer="tiny", egl=False, seed=0, c=a.c,
                          reward_fn=ShinReward(cfg.get("vz_penalty", "literal")),
                          vz_max=cfg.get("vz_max", 3.0), motor_mode=motor, gui=live)
-    if live:
-        p.configureDebugVisualizer(p.COV_ENABLE_GUI, 0, physicsClientId=env.sim.cid)
+    view = LiveView(env.sim, a.slow) if live else None
+    if view:
+        view.title_txt = title
     writer, path = None, a.video
     if path:
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
@@ -159,6 +232,8 @@ def main():
             state = pol.initial_state(1) if pol is not None else None
             start = torch.ones(1)
             outcome, k, cmd_vz = None, 0, 0.0
+            if view:
+                view.start_episode(title, seed)
             while k < a.max_steps:
                 if pol is None:
                     rel_p, rel_v, s = env.sim.true_relative_state()
@@ -183,19 +258,19 @@ def main():
                     for _ in range(10 if done else 1):          # hold the last frame 1 s
                         writer.write(f)
                 else:
-                    s = env.sim.quad.state()
-                    tgt = 0.5 * (s["pos"] + env.sim.plat.pad_center())
-                    p.resetDebugVisualizerCamera(7.0, np.degrees(env.sim.plat.psi) - 90.0, -25.0,
-                                                 tgt.tolist(), physicsClientId=env.sim.cid)
-                    time.sleep(0.1 * a.slow)
+                    view.status(k, cmd_vz)
                 if done:
                     break
             vz = info.get("rel_vel", [np.nan] * 3)[2] if outcome else float("nan")
             print(f"episode seed {seed}: {outcome or 'stopped'} after {k} steps ({k * 0.1:.1f} s), "
                   f"touchdown vertical speed {vz:+.2f} m/s", flush=True)
-            if live:
-                time.sleep(1.0)
+            if view:
+                view.end_episode(outcome, vz)
+        if view and a.hold:
+            input("Done. Press Enter to close the window... ")
     finally:
+        if view:
+            view.close()
         if writer is not None:
             writer.release()
             print(f"video written: {os.path.abspath(path)}")
