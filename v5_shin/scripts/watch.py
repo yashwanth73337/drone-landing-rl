@@ -14,9 +14,8 @@ Episodes are the SAME pinned episodes as evaluate.py: episode i uses seed seed_b
 deterministic (mean) actions, so what you see is what the evaluation counted. The motor model and
 the true-state injection can be switched exactly as in evaluate.py (--motor, --inject-true-state).
 
-Live window: the drone hovers at its start for 1.5 s, then flies in real time (10 ms per
-physics step), with a red trail and a status label (time, height above the pad top h,
-horizontal distance d, vertical speed vz); the outcome is shown for 2.5 s at the end.
+Live window: the drone is shown at its start point for 1.5 s, then flies in real time with the
+camera following it; it pauses 2 s on touchdown. Outcomes are printed in the terminal.
 --slow 2 plays at half speed; --hold keeps the window open at the end (for screen recording).
 
 Usage (from ~/mtp/drone-landing-rl):
@@ -112,18 +111,40 @@ def frame(sim, title, seed, k, cmd, outcome=None, info=None):
 
 
 class LiveView:
-    """Live 3D window: smooth real-time playback (the window is refreshed after every 10 ms
-    physics step), a camera that follows the drone and the pad, a red trail of the drone's
-    path, a status label above the drone, and pauses at the start and end of each episode.
-    The trail and labels are window-only drawings: the drone's own camera (TinyRenderer)
-    never renders them, so the policy sees exactly what it sees in evaluation."""
+    """Live 3D window: real-time playback (refreshed after every 10 ms physics step), a camera
+    that follows the drone, and short pauses at the start and end of each episode.
+    The simulated drone's own shape is a plain 0.25 m slab; for the window only, it is dressed
+    as a quadrotor (dark body, two arms, four rotor discs, the two FRONT rotors red). These
+    parts are visual only (no mass, no collision) and sit behind/above the drone's camera,
+    outside its field of view, so the policy sees exactly what it sees in evaluation."""
+
+    PARTS = (  # (shape, size, local position, yaw deg, colour)
+        ("box", (0.09, 0.09, 0.035), (0.0, 0.0, 0.0), 0, (0.15, 0.15, 0.15, 1)),
+        ("box", (0.19, 0.012, 0.012), (0.0, 0.0, 0.02), 45, (0.25, 0.25, 0.25, 1)),
+        ("box", (0.19, 0.012, 0.012), (0.0, 0.0, 0.02), -45, (0.25, 0.25, 0.25, 1)),
+        ("cyl", (0.075, 0.008), (0.13, 0.13, 0.035), 0, (0.9, 0.1, 0.1, 1)),
+        ("cyl", (0.075, 0.008), (0.13, -0.13, 0.035), 0, (0.9, 0.1, 0.1, 1)),
+        ("cyl", (0.075, 0.008), (-0.13, 0.13, 0.035), 0, (0.05, 0.05, 0.05, 1)),
+        ("cyl", (0.075, 0.008), (-0.13, -0.13, 0.035), 0, (0.05, 0.05, 0.05, 1)),
+    )
 
     def __init__(self, sim, slow):
         self.sim, self.slow, self.cid = sim, slow, sim.cid
         for flag in (p.COV_ENABLE_GUI, p.COV_ENABLE_RGB_BUFFER_PREVIEW,
                      p.COV_ENABLE_DEPTH_BUFFER_PREVIEW, p.COV_ENABLE_SEGMENTATION_MARK_PREVIEW):
             p.configureDebugVisualizer(flag, 0, physicsClientId=self.cid)
-        self.prev, self.n, self.ids = None, 0, {}
+        p.changeVisualShape(sim.quad.body, -1, rgbaColor=[0.15, 0.15, 0.15, 1], physicsClientId=self.cid)
+        self.parts = []
+        for shape, size, pos, yaw, rgba in self.PARTS:
+            if shape == "box":
+                v = p.createVisualShape(p.GEOM_BOX, halfExtents=size, rgbaColor=rgba, physicsClientId=self.cid)
+            else:
+                v = p.createVisualShape(p.GEOM_CYLINDER, radius=size[0], length=size[1], rgbaColor=rgba,
+                                        physicsClientId=self.cid)
+            b = p.createMultiBody(baseMass=0, baseCollisionShapeIndex=-1, baseVisualShapeIndex=v,
+                                  physicsClientId=self.cid)
+            self.parts.append((b, np.array(pos), p.getQuaternionFromEuler([0, 0, np.radians(yaw)])))
+        self.cam = None
         self._orig_step = p.stepSimulation
         p.stepSimulation = self._step            # this process only; restored in close()
 
@@ -132,49 +153,35 @@ class LiveView:
 
     def _step(self, *args, **kw):
         r = self._orig_step(*args, **kw)
-        self.n += 1
-        pos = self.sim.quad.state()["pos"].tolist()
-        if self.prev is not None and self.n % 2 == 0:
-            p.addUserDebugLine(self.prev, pos, [1.0, 0.15, 0.15], 2.0, 0, physicsClientId=self.cid)
-            self.prev = pos
         self.follow()
         time.sleep(0.01 * self.slow)
         return r
 
     def follow(self):
-        pos = self.sim.quad.state()["pos"]
-        pad = self.sim.plat.pad_center()
-        tgt = 0.7 * pos + 0.3 * pad
-        dist = float(np.clip(2.5 + 0.45 * np.linalg.norm(pos - pad), 3.5, 7.0))
-        p.resetDebugVisualizerCamera(dist, np.degrees(self.sim.plat.psi) - 90.0, -30.0, tgt.tolist(),
-                                     physicsClientId=self.cid)
-
-    def text(self, key, txt, pos, color, size=1.2):
-        kw = {"replaceItemUniqueId": self.ids[key]} if key in self.ids else {}
-        self.ids[key] = p.addUserDebugText(txt, list(pos), color, size, 0, physicsClientId=self.cid, **kw)
+        s = self.sim.quad.state()
+        pos, quat = s["pos"], s["quat"]
+        for b, lp, lq in self.parts:                 # move the quadrotor dressing with the drone
+            wp, wq = p.multiplyTransforms(pos.tolist(), quat.tolist(), lp.tolist(), lq)
+            p.resetBasePositionAndOrientation(b, wp, wq, physicsClientId=self.cid)
+        # chase camera: 2.5 m behind and above the drone, looking the way the drone faces (towards the pad)
+        yaw = float(p.getEulerFromQuaternion(quat.tolist())[2])
+        cam = np.array([*pos, np.cos(yaw), np.sin(yaw)])
+        self.cam = cam if self.cam is None else 0.85 * self.cam + 0.15 * cam   # smooth, no jitter
+        fwd = self.cam[3:] / (np.linalg.norm(self.cam[3:]) + 1e-9)
+        tgt = self.cam[:3] + np.array([0.5 * fwd[0], 0.5 * fwd[1], -0.6])
+        p.resetDebugVisualizerCamera(2.5, np.degrees(np.arctan2(fwd[1], fwd[0])) - 90.0, -45.0,
+                                     tgt.tolist(), physicsClientId=self.cid)
 
     def start_episode(self, title, seed):
-        p.removeAllUserDebugItems(physicsClientId=self.cid)
-        self.ids = {}
-        pos = self.sim.quad.state()["pos"]
-        self.prev = pos.tolist()
+        self.cam = None
         self.follow()
-        self.text("title", title, pos + [0, 0, 1.1], [0.1, 0.1, 0.1])
-        self.text("status", f"episode seed {seed}: start", pos + [0, 0, 0.7], [0.1, 0.1, 0.8])
-        time.sleep(1.5 * self.slow)              # show the drone hovering at its start point
+        time.sleep(1.5 * self.slow)              # show the drone at its start point in the air
 
     def status(self, k, cmd_vz):
-        s = self.sim.quad.state()
-        rel = s["pos"] - self.sim.plat.pad_center()
-        self.text("title", self.title_txt, s["pos"] + [0, 0, 1.1], [0.1, 0.1, 0.1])
-        self.text("status", f"t {k * 0.1:4.1f} s  h {rel[2]:4.1f} m  d {np.hypot(rel[0], rel[1]):4.1f} m  "
-                            f"vz {s['v'][2]:+4.1f} m/s", s["pos"] + [0, 0, 0.7], [0.1, 0.1, 0.8])
+        pass
 
     def end_episode(self, outcome, vz):
-        good = outcome == "success"
-        self.text("status", f"{(outcome or 'stopped').upper()}   touchdown {vz:+.2f} m/s",
-                  self.sim.quad.state()["pos"] + [0, 0, 0.7], [0.0, 0.6, 0.0] if good else [0.85, 0.0, 0.0], 1.6)
-        time.sleep(2.5 * self.slow)
+        time.sleep(2.0 * self.slow)              # pause on the touchdown
 
 
 def main():
