@@ -1,0 +1,77 @@
+{
+  "run": "A_s2_cont2",
+  "ckpt": "latest.pt",
+  "timestep": 12001280,
+  "c": 0.125,
+  "episodes": 1000,
+  "seed_base": 9000,
+  "policy": "deterministic(mean)",
+  "renderer": "tiny",
+  "vz_max": 1.0,
+  "mode": "vision",
+  "motor": "asym",
+  "trained_motor": "asym",
+  "inject_true_state": false,
+  "success_rate": 0.928,
+  "success_ci95": [
+    0.9102878591617453,
+    0.9424363156483045
+  ],
+  "strict_success_rate": 0.847,
+  "strict_ci95": [
+    0.8233629868076504,
+    0.8679811455733946
+  ],
+  "outcomes": {
+    "success": 928,
+    "crash_ground": 34,
+    "crash_platform": 29,
+    "tilt": 8,
+    "drift": 1,
+    "timeout": 0
+  },
+  "impact_vz_median": -4.218138845827867,
+  "impact_vz_p10": -5.59125404858317,
+  "impact_vz_p90": -3.1012026729444457,
+  "impact_speed_median": 4.957458826695124,
+  "steps_to_land_median": 19.0,
+  "safe_success": {
+    "<=0.5": 0.0,
+    "<=1.0": 0.0,
+    "<=1.5": 0.002,
+    "<=2.0": 0.002
+  },
+  "safe_strict_success": {
+    "<=0.5": 0.0,
+    "<=1.0": 0.0,
+    "<=1.5": 0.002,
+    "<=2.0": 0.002
+  },
+  "cmd_vz_last5_median": -0.3000798046588898,
+  "wall_s": 201.2,
+  "update": 2930,
+  "est_pos_rmse_m": 0.31167447566986084,
+  "est_vel_rmse_ms": 0.9470871090888977,
+  "est_pos_err_by_blind_age": {
+    "0-0": {
+      "n": 15079,
+      "mean_m": 0.1571346867810075
+    },
+    "1-15": {
+      "n": 3881,
+      "mean_m": 0.37240742509323155
+    },
+    "16-60": {
+      "n": 14,
+      "mean_m": 1.2072050699165888
+    },
+    "61-120": {
+      "n": 0,
+      "mean_m": null
+    },
+    "121-inf": {
+      "n": 0,
+      "mean_m": null
+    }
+  }
+}
