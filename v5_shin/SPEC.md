@@ -1061,3 +1061,37 @@ The share never exceeds 27%. A's estimation RMSE at c = 0.5 by seed: 0.84 / 0.68
   - c ≤ 0.625 is unchanged within noise from 8M (92.8–95.5%).
   - **Touchdown still hard:** median −3.5 to −4.2 m/s, safe success at ≤ 1 m/s 0.0–0.7%.
   - **Single seed:** only seed 2 has been trained past 4M; A_s1 and A_s3 stopped at L50 and L30.
+
+### A_s2_cont3 (8–9 Oct 2026): third continuation of A_s2 (configuration A, seed 2) from 12.0M to 16.0M steps, trained at full difficulty (L80, c = 1)
+
+- **Command:** `cp v5_shin/runs/A_s2_cont2/{config.json,latest.pt,updates.csv,episodes.csv,curriculum.csv} v5_shin/runs/A_s2_cont3/`, then `python -m v5_shin.scripts.train_ppo --mode vision --name A_s2_cont3 --seed 2 --total-steps 16000000 --renderer tiny --device cuda --resume`. Started 8 Oct evening IST, finished 9 Oct 17:15 IST (about 20 h, 56–59 decisions/s). Resumed at u2931 (12,005,376 steps, L80); ended at u3907, 16,003,072 steps.
+- **DEVIATION (third learning-rate restart):** same mechanism as A_s2_cont and A_s2_cont2. With total_updates about 3907, the linear schedule resumed at about 7.5e-5 (u2931) and decayed to 0 at 16M. KL spiked on the first update (1.39, higher than the 0.32 and 0.19 of the earlier restarts), then settled to about 0.001 within a few dozen updates and 0.0000 at the end. `config.json` is still the original (total_steps 4,000,000). A_s2 has now had four learning-rate schedules (0–4M, 4–8M, 8–12M, 12–16M); results are not comparable with the 4M-step A seeds, or with P (2M steps).
+- **Curriculum:** L80 (c = 1, the maximum) for the whole run, so this is the first run trained entirely at full difficulty. Stochastic training-policy success over the last 10 updates (u3898–u3907): 1,093 / 1,445 episodes = 75.6% (the first L80 window in A_s2_cont2 was 0.670).
+- **Pinned evaluation** (1,000 episodes, seed base 9000, deterministic mean actions, asym motors, renderer tiny; success % with Wilson 95% CI):
+
+| Checkpoint (steps) | c | Success | Strict | Median touchdown vz (m/s) | Safe ≤ 1 m/s (%) | Est. RMSE pos / vel | Ground crash / platform crash / tilt / drift / timeout |
+|---|---|---|---|---|---|---|---|
+| latest.pt (u3907, 16,003,072) | 0.125 | 90.5 [88.5, 92.2] | 82.8 | −4.19 | 0.1 | 0.26 / 1.03 | 47 / 31 / 17 / 0 / 0 |
+| latest.pt | 0.5 | 95.6 [94.1, 96.7] | 90.0 | −3.91 | 0.2 | 0.29 / 0.81 | 25 / 12 / 7 / 0 / 0 |
+| latest.pt | 0.625 | 93.5 [91.8, 94.9] | 86.6 | −3.82 | 0.2 | 0.34 / 0.81 | 41 / 18 / 6 / 0 / 0 |
+| latest.pt | 1.0 | **82.8 [80.3, 85.0]** | 71.3 | −3.42 | 0.5 | 0.69 / 1.09 | 92 / 53 / 22 / 5 / 0 |
+| latest.pt, inject true state | 0.5 | 94.9 [93.4, 96.1] | 89.5 | −3.88 | 0.0 | 0.29 / 0.80 | 29 / 13 / 9 / 0 / 0 |
+| latest.pt, inject true state | 1.0 | 84.7 [82.3, 86.8] | 72.8 | −3.49 | 0.5 | 0.69 / 1.07 | 87 / 39 / 23 / 4 / 0 |
+
+- **A_s2 at c = 1 over training (same 1,000 pinned episodes each):**
+
+| Checkpoint | Steps | Success | Ground crash / platform crash / tilt / drift | Est. pos / vel RMSE |
+|---|---|---|---|---|
+| A_s2 latest | 4.0M (L50) | 52.4 | — | — |
+| A_s2_cont latest | 8.0M (L70) | 70.5 | 181 / 59 / 12 / 43 | 1.40 / 1.40 |
+| A_s2_cont2 latest | 12.0M (L80 reached) | 76.2 | 147 / 63 / 17 / 11 | 0.99 / 1.23 |
+| A_s2_cont3 latest | 16.0M (L80 throughout) | **82.8** | 92 / 53 / 22 / 5 | 0.69 / 1.09 |
+
+- **Findings:**
+  - **c = 1: 76.2 → 82.8 (+6.6 points; two-proportion z about 3.7, unpaired, same pinned episodes).** The gain per 4M steps has been +18.1, +5.7, +6.6, so seed 2 had not plateaued at 16M. It is below the paper's 91% for this variant (the upper CI bound, 85.0, is below 91) and within the per-seed range of P at c = 1 (81.5–89.9, 3-seed mean 85.1; P used 2M steps, 3 seeds). This is a single seed.
+  - **Where the c = 1 gain came from:** ground crashes fell 147 → 92; drift is nearly gone (5). Platform crashes (53) are unchanged, and tilt failures are rising (12 → 17 → 22).
+  - **Estimation at c = 1 now equals or beats the paper's ArUco variant:** 0.69 m / 1.09 m/s against the paper's 0.953 m / 1.063 m/s (Table IV, training scenario; velocity roughly equal).
+  - **True-state injection:** at c = 1, 82.8 → 84.7 (+1.9, CIs overlap); the gap to P's 3-seed mean (85.1) is now only 2.3 points, within noise. At c = 0.5, injection gives 95.6 → 94.9 (no benefit). The state estimate is no longer a measurable limit for A_s2. Caveat: injection replaces only y[0:6]; the decision MLP still receives the other 250 vision-derived numbers.
+  - **Cost at easy difficulty (observation, not yet explained):** c = 0.125 went 94.5 (8M) → 92.8 (12M) → 90.5 (16M), with tilt failures 9 → 8 → 17; c = 0.625 went 92.8 → 94.5 → 93.5; c = 0.5 is stable at 94.5–95.6. The 8M → 16M drop at c = 0.125 is 4.0 points (z about 3.4, unpaired). Training only at c = 1 may trade a little performance on slow platforms. Not tested.
+  - **Touchdown is still hard:** median −3.4 to −4.2 m/s; safe success at ≤ 1 m/s is 0.0–0.5% everywhere, unchanged by 12M extra steps (no speed term in the reward or the success definition).
+  - **Limitations:** one seed (A_s1 and A_s3 stopped at L50 and L30); four learning-rate schedules, not the paper's protocol; the paper's training budget is unknown.
