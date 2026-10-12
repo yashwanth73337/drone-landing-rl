@@ -1130,3 +1130,42 @@ The share never exceeds 27%. A's estimation RMSE at c = 0.5 by seed: 0.84 / 0.68
   - **Easy difficulty:** c = 0.125 is 91.1 (90.5 at 16M, 92.8 at 12M, 94.5 at 8M), so the earlier decline has levelled off; c = 0.5 is 94.2 (95.6 at 16M) and c = 0.625 is 94.9 (93.5 at 16M); differences from 16M are within noise.
   - **Touchdown is still hard:** median −3.5 to −4.3 m/s; safe success at ≤ 1 m/s is 0.0–0.7% everywhere, unchanged by 16M extra steps (no speed term in the reward or the success definition).
   - **Limitations:** one seed (A_s1 and A_s3 stopped at L50 and L30); five learning-rate schedules, not the paper's protocol; the paper's training budget is unknown.
+
+### Paired analysis of the A_s2 evaluations (12 Oct 2026): evaluation data only, no training
+
+- **Script:** `v5_shin/scripts/paired_eval.py` (md5 `37910a0adba5f7158640880ff1ce47d8`; standard library only; reads `runs/*/eval_*/episodes.csv`, writes nothing). Run as `python v5_shin/scripts/paired_eval.py` from the repository root. It compares two evaluations on the same 1,000 pinned episodes (episode i = seed 9000 + i) and reports the difference in success, a paired Wald 95% CI, the discordant counts and an exact two-sided McNemar p. Pairing controls for the initial conditions only; a policy's own actions still change the trajectory. 14 comparisons were made and the p-values are not corrected for multiple testing (Bonferroni cut-off 0.0036).
+- **Training progress, c = 1.0, `latest.pt` of each A_s2 stage:**
+
+| Stage | Success | Difference [paired 95% CI] | Success in earlier only / later only | McNemar p |
+|---|---|---|---|---|
+| 4M → 8M | 52.4 → 70.5 | +18.1 [+14.9, +21.3] | 62 / 243 | < 0.0001 |
+| 8M → 12M | 70.5 → 76.2 | +5.7 [+2.6, +8.8] | 95 / 152 | 0.0003 |
+| 12M → 16M | 76.2 → 82.8 | +6.6 [+3.6, +9.6] | 88 / 154 | < 0.0001 |
+| 16M → 20M | 82.8 → 86.5 | +3.7 [+1.1, +6.3] | 72 / 109 | 0.0073 |
+
+- **True-state injection (normal → injected), `latest.pt`:**
+
+| Checkpoint | c | Success | Difference [paired 95% CI] | Normal only / injected only | McNemar p |
+|---|---|---|---|---|---|
+| 8M | 1.0 | 70.5 → 75.2 | +4.7 [+1.9, +7.5] | 80 / 127 | 0.0013 |
+| 12M | 1.0 | 76.2 → 78.6 | +2.4 [−0.3, +5.1] | 80 / 104 | 0.0897 |
+| 16M | 1.0 | 82.8 → 84.7 | +1.9 [−0.5, +4.3] | 66 / 85 | 0.1427 |
+| 20M | 1.0 | 86.5 → 89.6 | +3.1 [+0.9, +5.3] | 48 / 79 | 0.0075 |
+| 8M | 0.5 | 94.5 → 95.0 | +0.5 [−1.2, +2.2] | 36 / 41 | 0.6488 |
+| 12M | 0.5 | 95.5 → 95.3 | −0.2 [−1.8, +1.4] | 34 / 32 | 0.9022 |
+| 16M | 0.5 | 95.6 → 94.9 | −0.7 [−2.3, +0.9] | 37 / 30 | 0.4638 |
+| 20M | 0.5 | 94.2 → 96.4 | +2.2 [+0.8, +3.6] | 16 / 38 | 0.0038 |
+
+- **Easy difficulty, c = 0.125, `latest.pt`:**
+
+| Comparison | Success | Difference [paired 95% CI] | Earlier only / later only | McNemar p |
+|---|---|---|---|---|
+| 8M → 20M | 94.5 → 91.1 | −3.4 [−5.4, −1.4] | 71 / 37 | 0.0014 |
+| 16M → 20M | 90.5 → 91.1 | +0.6 [−1.6, +2.8] | 60 / 66 | 0.6562 |
+
+- **Findings:**
+  - Every 4M stage at c = 1 is a real gain, including 16M → 20M (+3.7). The gains shrink: +18.1, +5.7, +6.6, +3.7. That last p (0.0073) would not survive a strict Bonferroni correction over all 14 comparisons.
+  - **True-state injection at c = 1 is positive at all four checkpoints (+4.7, +2.4, +1.9, +3.1; mean +3.0) and individually significant at 8M and 20M.** This supersedes the wording "no longer a measurable limit" in the A_s2_cont3 entry, which came from an unpaired comparison; the paired data show a small but consistent effect of about 2–5 points. At c = 0.5 the effect is inconsistent (+0.5, −0.2, −0.7, +2.2).
+  - At 20M, injection removes 31 of the 135 failures at c = 1 (23%); 104 failures remain with the true y[0:6]. Most remaining failures are therefore not explained by the 6-number estimate alone. The injected result (89.6 [87.6, 91.3]) is statistically consistent with the paper's 91%.
+  - c = 0.125 declined from 94.5 (8M) to 91.1 (20M) (paired p = 0.0014, a real loss on slow platforms) and has been flat since 16M.
+  - **Caveat on P as a "control ceiling":** P was trained for 2M steps and A_s2 for 20M. A_s2 with injected state (89.6) sits at the top of P's per-seed range at c = 1 (81.5–89.9), so the A–P comparisons are confounded by step budget, and P at 2M should not be read as an upper bound.
