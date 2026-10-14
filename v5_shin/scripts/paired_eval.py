@@ -54,7 +54,7 @@ def compare(label, pa, pb):
           f"   [matched on {key or 'row order'}; success = {how}]")
 
 print("== Training progress, c = 1.0, latest.pt (A = earlier, B = later)")
-chain = [("A_s2", "4M"), ("A_s2_cont", "8M"), ("A_s2_cont2", "12M"), ("A_s2_cont3", "16M"), ("A_s2_cont4", "20M")]
+chain = [("A_s2", "4M"), ("A_s2_cont", "8M"), ("A_s2_cont2", "12M"), ("A_s2_cont3", "16M"), ("A_s2_cont4", "20M"), ("A_s2_cont5", "26M")]
 for (r1, s1), (r2, s2) in zip(chain, chain[1:]):
     compare(f"{s1} -> {s2}", path(r1, "latest", "1.0"), path(r2, "latest", "1.0"))
 
@@ -66,3 +66,5 @@ for run, s in chain[1:]:
 print("\n== Easy difficulty, c = 0.125, latest.pt")
 compare("8M -> 20M", path("A_s2_cont", "latest", "0.125"), path("A_s2_cont4", "latest", "0.125"))
 compare("16M -> 20M", path("A_s2_cont3", "latest", "0.125"), path("A_s2_cont4", "latest", "0.125"))
+compare("8M -> 26M", path("A_s2_cont", "latest", "0.125"), path("A_s2_cont5", "latest", "0.125"))
+compare("20M -> 26M", path("A_s2_cont4", "latest", "0.125"), path("A_s2_cont5", "latest", "0.125"))

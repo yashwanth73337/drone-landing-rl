@@ -1169,3 +1169,50 @@ The share never exceeds 27%. A's estimation RMSE at c = 0.5 by seed: 0.84 / 0.68
   - At 20M, injection removes 31 of the 135 failures at c = 1 (23%); 104 failures remain with the true y[0:6]. Most remaining failures are therefore not explained by the 6-number estimate alone. The injected result (89.6 [87.6, 91.3]) is statistically consistent with the paper's 91%.
   - c = 0.125 declined from 94.5 (8M) to 91.1 (20M) (paired p = 0.0014, a real loss on slow platforms) and has been flat since 16M.
   - **Caveat on P as a "control ceiling":** P was trained for 2M steps and A_s2 for 20M. A_s2 with injected state (89.6) sits at the top of P's per-seed range at c = 1 (81.5–89.9), so the A–P comparisons are confounded by step budget, and P at 2M should not be read as an upper bound.
+
+### A_s2_cont5 (12–14 Oct 2026): fifth continuation of A_s2 (configuration A, seed 2) from 20.0M to 26.0M steps, trained at full difficulty (L80, c = 1)
+
+- **Command:** `cp v5_shin/runs/A_s2_cont4/{config.json,latest.pt,updates.csv,episodes.csv,curriculum.csv} v5_shin/runs/A_s2_cont5/`, then `python -m v5_shin.scripts.train_ppo --mode vision --name A_s2_cont5 --seed 2 --total-steps 26000000 --renderer tiny --device cuda --resume`. Started 12 Oct about 21:10 IST, finished 14 Oct (about 29 h, 56–60 decisions/s). Resumed at u4884 (20,004,864 steps, L80); ended at u6348, 26,001,408 steps.
+- **DEVIATION (fifth learning-rate restart):** same mechanism as the earlier continuations, but over 6M steps instead of 4M. With total_updates about 6347, the linear schedule resumed at about 6.9e-5 (u4884) and decayed to 0 at 26M. KL spiked on the first update (1.67; 1.36 and 1.39 at the two previous restarts) and was 0.0000 at the end. `config.json` is still the original (total_steps 4,000,000). A_s2 has now had six learning-rate schedules (0–4M, 4–8M, 8–12M, 12–16M, 16–20M, 20–26M); results are not comparable with the 4M-step A seeds, or with P (2M steps).
+- **Curriculum:** L80 (c = 1) for the whole run. Stochastic training-policy success over the last 10 updates (u6339–u6348): 1,256 / 1,510 episodes = 83.2% (A_s2_cont3: 75.6% over its last 10 updates).
+- **Pinned evaluation** (1,000 episodes, seed base 9000, deterministic mean actions, asym motors, renderer tiny; success % with Wilson 95% CI):
+
+| Checkpoint (steps) | c | Success | Strict | Median touchdown vz (m/s) | Safe ≤ 1 m/s (%) | Est. RMSE pos / vel | Ground crash / platform crash / tilt / drift / timeout |
+|---|---|---|---|---|---|---|---|
+| latest.pt (u6348, 26,001,408) | 0.125 | 90.5 [88.5, 92.2] | 86.3 | −3.94 | 0.0 | 0.28 / 1.00 | 58 / 22 / 14 / 1 / 0 |
+| latest.pt | 0.5 | 95.3 [93.8, 96.4] | 92.2 | −3.72 | 0.1 | 0.29 / 0.78 | 26 / 8 / 13 / 0 / 0 |
+| latest.pt | 0.625 | 94.7 [93.1, 95.9] | 90.1 | −3.61 | 0.1 | 0.35 / 0.79 | 30 / 15 / 6 / 2 / 0 |
+| latest.pt | 1.0 | **88.5 [86.4, 90.3]** | 78.2 | −3.33 | 0.6 | 0.60 / 1.01 | 49 / 38 / 21 / 7 / 0 |
+| latest.pt, inject true state | 0.5 | 95.5 [94.0, 96.6] | 91.9 | −3.71 | 0.1 | 0.29 / 0.78 | 27 / 9 / 9 / 0 / 0 |
+| latest.pt, inject true state | 1.0 | 90.5 [88.5, 92.2] | 81.5 | −3.40 | 0.5 | 0.57 / 1.00 | 46 / 31 / 14 / 4 / 0 |
+
+- **A_s2 at c = 1 over training (same 1,000 pinned episodes each):**
+
+| Checkpoint | Steps | Success | Ground crash / platform crash / tilt / drift | Est. pos / vel RMSE |
+|---|---|---|---|---|
+| A_s2 latest | 4.0M (L50) | 52.4 | — | — |
+| A_s2_cont latest | 8.0M (L70) | 70.5 | 181 / 59 / 12 / 43 | 1.40 / 1.40 |
+| A_s2_cont2 latest | 12.0M (L80 reached) | 76.2 | 147 / 63 / 17 / 11 | 0.99 / 1.23 |
+| A_s2_cont3 latest | 16.0M (L80 throughout) | 82.8 | 92 / 53 / 22 / 5 | 0.69 / 1.09 |
+| A_s2_cont4 latest | 20.0M (L80 throughout) | 86.5 | 75 / 41 / 16 / 3 | 0.61 / 1.05 |
+| A_s2_cont5 latest | 26.0M (L80 throughout) | **88.5** | 49 / 38 / 21 / 7 | 0.60 / 1.01 |
+
+- **Paired comparisons** (`v5_shin/scripts/paired_eval.py`, updated for this run: md5 `2ec9209994427cff73fdb296c9eea561`; the previous entry cites the earlier version, md5 `37910a0adba5f7158640880ff1ce47d8`; difference, paired 95% CI, earlier-only / later-only successes, exact McNemar p):
+
+| Comparison | c | Difference | Discordant | p |
+|---|---|---|---|---|
+| 20M → 26M | 1.0 | +2.0 [−0.6, +4.6] | 75 / 95 | 0.1448 |
+| 26M normal → injected | 1.0 | +2.0 [+0.0, +4.0] | 41 / 61 | 0.0594 |
+| 26M normal → injected | 0.5 | +0.2 [−1.0, +1.4] | 17 / 19 | 0.8679 |
+| 8M → 26M | 0.125 | −4.0 [−6.2, −1.8] | 82 / 42 | 0.0004 |
+| 20M → 26M | 0.125 | −0.6 [−2.7, +1.5] | 60 / 54 | 0.6398 |
+
+  There are now 19 paired comparisons in total (5 training, 10 injection, 4 easy-difficulty), uncorrected; a strict Bonferroni cut-off would be 0.0026.
+- **Findings:**
+  - **Seed 2 has plateaued at about 88–89% at c = 1.** The gain per stage has been +18.1, +5.7, +6.6, +3.7 (4M steps each) and +2.0 (6M steps); the last is not significant (paired p = 0.14).
+  - 88.5 [86.4, 90.3] is above P's 3-seed mean at c = 1 (85.1) and inside P's per-seed range (81.5–89.9); it is below the paper's 91% for this variant (upper CI bound 90.3). With injected state the result is 90.5 [88.5, 92.2], which includes 91.
+  - **Failures at c = 1 (115 of 1,000):** ground crash 49, platform crash 38, tilt 21, drift 7. Ground crashes keep falling (75 → 49); tilt failures have fluctuated (12, 17, 22, 16, 21); strict success is 78.2 (74.3 at 20M).
+  - **True-state injection at c = 1 has been positive at all five checkpoints (+4.7, +2.4, +1.9, +3.1, +2.0; mean +2.8)**, individually significant at 8M and 20M only. At c = 0.5 it is inconsistent (+0.5, −0.2, −0.7, +2.2, +0.2).
+  - **c = 0.125:** 94.5 (8M) → 90.5 (26M), a real loss (paired p = 0.0004) that arose between 8M and 16M and has been flat since. c = 0.5 is 95.3 and c = 0.625 is 94.7, unchanged within noise.
+  - **Touchdown is still hard:** median −3.3 to −3.9 m/s; safe success at ≤ 1 m/s is 0.0–0.6% everywhere.
+  - **Limitations:** one seed (A_s1 and A_s3 stopped at L50 and L30); six learning-rate schedules, not the paper's protocol; the paper's training budget is unknown. Whether the plateau is a property of the method or of this seed is not tested.
