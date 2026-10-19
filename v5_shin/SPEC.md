@@ -1216,3 +1216,54 @@ The share never exceeds 27%. A's estimation RMSE at c = 0.5 by seed: 0.84 / 0.68
   - **c = 0.125:** 94.5 (8M) → 90.5 (26M), a real loss (paired p = 0.0004) that arose between 8M and 16M and has been flat since. c = 0.5 is 95.3 and c = 0.625 is 94.7, unchanged within noise.
   - **Touchdown is still hard:** median −3.3 to −3.9 m/s; safe success at ≤ 1 m/s is 0.0–0.6% everywhere.
   - **Limitations:** one seed (A_s1 and A_s3 stopped at L50 and L30); six learning-rate schedules, not the paper's protocol; the paper's training budget is unknown. Whether the plateau is a property of the method or of this seed is not tested.
+
+### A_s1_cont to A_s1_cont4 (14–18 Oct 2026): continuation of A_s1 (configuration A, seed 1) from 4.0M to 20.0M steps in four stages, trained at full difficulty (L80, c = 1) from the second stage
+
+Second full-difficulty seed (option C). Same stage pattern as seed 2: `--total-steps` 8M, 12M, 16M, 20M, each stage resumed from the previous run's latest.pt in a new run folder (config.json and CSV logs copied; config.json still says total_steps 4,000,000). Every stage restarts the linear learning-rate schedule (about 1.5e-4 at u978, 1.0e-4 at u1955, 7.5e-5 at u2931, 6.0e-5 at u3908), a deviation from the paper, as on seed 2. The first-update KL of each stage was not recorded. Each stage took about 20 h at 57 decisions/s. Preflight before stage 1: A_s1/config.json seed 1, mode vision; log ended u977 (4,001,792 steps) at L50, window 25/30; torch.cuda.is_available() checked before each start (nvidia-smi fails with an NVML version mismatch).
+
+Command pattern (seed 1): `python -m v5_shin.scripts.train_ppo --mode vision --name A_s1_cont<k> --seed 1 --total-steps <8M|12M|16M|20M> --renderer tiny --device cuda --resume`.
+
+Run folders: A_s1_cont (4.0M to 8.0M, ended L70, last window 123/169), A_s1_cont2 (8.0M to 12.0M, reached L80 during the stage, level_80.pt saved; promotion step not extracted, last window 62/89), A_s1_cont3 (12.0M to 16.0M, L80, last window 94/134), A_s1_cont4 (16.0M to 20.0M, L80, last window 162/226).
+
+Pinned evaluations: 1,000 episodes, seed base 9000, deterministic mean actions, asymmetric motors, TinyRenderer, latest.pt of each run, 6 per stage (c 0.125, 0.5, 0.625, 1.0; then c 0.5 and 1.0 with `--inject-true-state`). Columns: success % [Wilson 95% CI] | strict % | median touchdown vz (m/s) | landings at or under 1 m/s (%) | est RMSE pos m / vel m/s | failures ground / platform / tilt / drift (timeouts 0 everywhere).
+
+A_s1_cont, u1954, 8,003,584 steps:
+- c 0.125: 91.4 [89.5, 93.0] | 82.7 | -4.42 | 0.0 | 0.28 / 0.92 | 57 / 26 / 3 / 0
+- c 0.5: 90.4 [88.4, 92.1] | 79.0 | -4.17 | 0.0 | 0.36 / 0.80 | 49 / 41 / 5 / 1
+- c 0.5 + true state: 92.6 [90.8, 94.1] | 82.5 | -4.13 | 0.0 | 0.35 / 0.79 | 40 / 30 / 4 / 0
+- c 0.625: 89.2 [87.1, 91.0] | 77.5 | -4.04 | 0.0 | 0.48 / 0.84 | 68 / 35 / 4 / 1
+- c 1.0: 69.6 [66.7, 72.4] | 53.6 | -3.81 | 0.2 | 1.36 / 1.36 | 199 / 83 / 10 / 12
+- c 1.0 + true state: 74.1 [71.3, 76.7] | 60.0 | -3.90 | 0.2 | 1.20 / 1.31 | 156 / 92 / 3 / 8
+
+A_s1_cont2, u2930, 12,001,280 steps:
+- c 0.125: 91.9 [90.0, 93.4] | 81.6 | -4.62 | 0.0 | 0.26 / 1.00 | 48 / 28 / 5 / 0
+- c 0.5: 92.9 [91.1, 94.3] | 84.7 | -4.29 | 0.0 | 0.35 / 0.81 | 40 / 26 / 5 / 0
+- c 0.5 + true state: 94.0 [92.4, 95.3] | 85.0 | -4.25 | 0.0 | 0.32 / 0.81 | 33 / 26 / 1 / 0
+- c 0.625: 91.4 [89.5, 93.0] | 81.7 | -4.16 | 0.0 | 0.43 / 0.84 | 50 / 35 / 1 / 0
+- c 1.0: 77.4 [74.7, 79.9] | 63.5 | -3.87 | 0.2 | 0.79 / 1.10 | 144 / 72 / 7 / 3
+- c 1.0 + true state: 79.5 [76.9, 81.9] | 67.9 | -3.91 | 0.1 | 0.62 / 1.06 | 137 / 61 / 7 / 0
+
+A_s1_cont3, u3907, 16,003,072 steps:
+- c 0.125: 86.8 [84.6, 88.8] | 76.7 | -4.37 | 0.2 | 0.27 / 1.00 | 77 / 36 / 19 / 0
+- c 0.5: 91.0 [89.1, 92.6] | 80.6 | -4.06 | 0.0 | 0.55 / 0.82 | 37 / 43 / 9 / 1
+- c 0.5 + true state: 93.1 [91.4, 94.5] | 83.0 | -4.12 | 0.1 | 0.60 / 0.83 | 32 / 31 / 5 / 1
+- c 0.625: 89.5 [87.4, 91.3] | 80.2 | -3.98 | 0.1 | 0.45 / 0.83 | 54 / 43 / 7 / 1
+- c 1.0: 80.1 [77.5, 82.5] | 63.9 | -3.75 | 0.3 | 0.63 / 1.04 | 128 / 67 / 4 / 0
+- c 1.0 + true state: 82.0 [79.5, 84.3] | 66.4 | -3.77 | 0.4 | 0.59 / 1.03 | 114 / 61 / 5 / 0
+
+A_s1_cont4, u4883, 20,000,768 steps:
+- c 0.125: 90.2 [88.2, 91.9] | 80.6 | -4.46 | 0.0 | 0.25 / 1.00 | 49 / 30 / 19 / 0
+- c 0.5: 91.9 [90.0, 93.4] | 84.2 | -4.18 | 0.1 | 0.42 / 0.81 | 26 / 42 / 12 / 1
+- c 0.5 + true state: 92.9 [91.1, 94.3] | 85.0 | -4.17 | 0.0 | 0.50 / 0.81 | 25 / 36 / 9 / 1
+- c 0.625: 92.3 [90.5, 93.8] | 83.3 | -4.00 | 0.2 | 0.37 / 0.81 | 34 / 38 / 5 / 0
+- c 1.0: 79.6 [77.0, 82.0] | 67.2 | -3.71 | 0.4 | 0.60 / 1.02 | 114 / 81 / 9 / 0
+- c 1.0 + true state: 82.9 [80.4, 85.1] | 69.6 | -3.69 | 0.2 | 0.53 / 1.00 | 102 / 62 / 7 / 0
+
+Reading (all comparisons are unpaired: two different policies on the same 1,000 episodes; no paired analysis has been run for seed 1):
+- Success at c = 1 on seed 1: 48.5 (4M, earlier A_s1 evaluation), 69.6, 77.4, 80.1, 79.6 (20M). Stage gains +21.1, +7.8, +2.7, -0.5; the last stage is flat within noise, so seed 1 has plateaued near 80%, about 7 points below seed 2 at the same step count (86.5 at 20M, intervals 77.0 to 82.0 against 84.2 to 88.5, which do not overlap). At 8M, 12M and 16M the two seeds overlapped (69.6 vs 70.5, 77.4 vs 76.2, 80.1 vs 82.8).
+- State versus control: injecting the true state gains +4.5, +2.1, +1.9, +3.3 points at c = 1 (seed 2: +4.7, +2.4, +1.9, +3.1 at the same steps) and removes 15%, 9%, 10%, 16% of failures. The estimation error at 20M is the same on both seeds (seed 1 0.60 m / 1.02 m/s, seed 2 0.61 / 1.05), yet seed 1 scores 82.9% with the true state against 89.6% for seed 2. The gap between the seeds therefore survives true-state injection, so it lies in the decision layers (the control side), not in the state estimate. Not tested beyond this comparison.
+- Failure mix at c = 1: drift 12, 3, 0, 0 (seed 2: 43, 11, 5, 3); platform crashes 83, 72, 67, 81 (seed 2: 59, 63, 53, 41); ground crashes 199, 144, 128, 114 (seed 2: 181, 147, 92, 75). Seed 1 loses the platform less often but crashes into it more often; its ground crashes fall more slowly.
+- Easy difficulty: c = 0.125 went 91.4, 91.9, 86.8, 90.2 (seed 2: 94.5, 92.8, 90.5, 91.1); tilt failures at c = 0.125 were 3, 5, 19, 19. The dip at 16M was therefore partly recovered at 20M, so the net loss from 12M is 1.7 points (intervals overlap). The earlier statement that the easy-difficulty cost "appears on both seeds" is weaker than it looked after the 16M evaluation. c = 0.5 stayed 2 to 5 points below seed 2 at 12M to 20M (91.9 vs 94.2 at 20M).
+- Hard landings are unchanged: the median touchdown speed is 3.7 to 4.6 m/s at every stage and difficulty and landings at or under 1 m/s are 0.0 to 0.4%, the same as seed 2.
+
+Caveats: one seed per comparison; four learning-rate restarts on seed 1; no paired analysis; promotion step to L80 of A_s1_cont2 not extracted; the first-update KL of each stage was not recorded; seed-1 results were not committed to git at the time of this entry. P (true-state, 2M steps) remains 85.1 at c = 1 (3 seeds) and is not a ceiling at this training budget.
