@@ -4,9 +4,11 @@ Planar unicycle with forward speed v and yaw rate w, following a bounded random
 walk (Shin et al. Sec. II-B, Table I):
     v_{t+1} = v_t + dv,   w_{t+1} = w_t + dw,  applied once per control step (0.1 s)
 scaled by the curriculum scalar c (SPEC D5) and clipped (SPEC D6).
-The body is a kinematic box (mass 0) whose pose is reset every physics step.
-The episode ends at touchdown, so the solver never needs the box's velocity;
-the platform's true velocity comes from this class.
+The body is a kinematic box (mass 0). Every physics step it starts at the
+class pose with the class velocity, PyBullet moves it during the step, and
+LandingSim then re-pins it to the exact arc (SPEC D19). So contacts see the
+real pad velocity and a resting drone is carried by friction.
+The platform's true velocity comes from this class.
 """
 import numpy as np
 import pybullet as p
@@ -101,4 +103,7 @@ class Platform:
         q = p.getQuaternionFromEuler([0, 0, self.psi])
         p.resetBasePositionAndOrientation(
             self.body, [self.x, self.y, PAD_TOP_Z / 2], q, physicsClientId=self.cid)
+        p.resetBaseVelocity(                                   # SPEC D19
+            self.body, self.velocity().tolist(), [0, 0, self.w],
+            physicsClientId=self.cid)
 

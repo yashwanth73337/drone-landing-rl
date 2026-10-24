@@ -1267,3 +1267,20 @@ Reading (all comparisons are unpaired: two different policies on the same 1,000 
 - Hard landings are unchanged: the median touchdown speed is 3.7 to 4.6 m/s at every stage and difficulty and landings at or under 1 m/s are 0.0 to 0.4%, the same as seed 2.
 
 Caveats: one seed per comparison; four learning-rate restarts on seed 1; no paired analysis; promotion step to L80 of A_s1_cont2 not extracted; the first-update KL of each stage was not recorded; seed-1 results were not committed to git at the time of this entry. P (true-state, 2M steps) remains 85.1 at c = 1 (3 seeds) and is not a ceiling at this training budget.
+
+### D19 (24 Oct 2026): platform velocity given to the solver
+
+- Problem: the pad was teleported (mass 0, pose reset each physics step) with zero
+  solver velocity. A drone resting on it was not carried (diag_pad_carry.py, motors
+  off: falls off at 2 m/s). This blocks any post-touchdown hold.
+- Fix: _sync() also sets the pad's linear and yaw velocity. LandingSim.step now calls
+  stepSimulation first (PyBullet moves the pad), then plat.integrate() re-pins it to
+  the exact arc; _sync() after perturb() passes the new speed.
+- Checks: pad pose after re-pin = class pose (0 m); PyBullet move vs arc 0.2 mm;
+  178 tests pass. Motors-off carry: holds at 2/5/8 m/s; slips at 5 m/s^2 and on the
+  8 m/s, 30 deg/s turn (friction 0.5 default). So the policy must track during a hold.
+- A_s2_cont5, c = 1, 1000 pinned episodes: 88.5% -> 89.5% [87.4, 91.3]; platform
+  crashes 38 -> 29; estimation, drift, tilt, impact v_z unchanged. Pre-D19 numbers
+  are kept as history; baselines are re-evaluated in the D19 sim before comparison.
+- First attempt (velocity without reordering) rejected: PyBullet advanced the pad
+  one extra substep, so the camera saw it up to 8 cm ahead.

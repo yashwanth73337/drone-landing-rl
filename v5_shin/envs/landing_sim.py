@@ -141,8 +141,8 @@ class LandingSim:
             self._v_pre = self.quad.state()["v"]
             self._vplat_pre = self.plat.velocity()
             self.quad.apply_control(cmd)
-            self.plat.integrate()
-            p.stepSimulation(physicsClientId=self.cid)
+            p.stepSimulation(physicsClientId=self.cid)   # pad moves with its velocity (SPEC D19)
+            self.plat.integrate()                        # re-pin pad to the exact arc
             outcome = self.check_termination()
             if outcome is not None:
                 sub = k + 1
@@ -150,6 +150,7 @@ class LandingSim:
         self.t += 1
         if outcome is None:
             self.plat.perturb(self.rng)
+            self.plat._sync()                            # new speed to the solver (SPEC D19)
         terminated = outcome is not None
         truncated = (not terminated) and self.t >= HORIZON
         if truncated:
