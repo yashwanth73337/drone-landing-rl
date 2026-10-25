@@ -131,7 +131,7 @@ class PPOTrainer:
                 for i in np.nonzero(done)[0]:
                     episodes.append({k: (fi[k][i] if k in fi else None) for k in
                                      ("outcome", "t", "c_episode", "com_over_pad", "rel_vel",
-                                      "tilt_deg")})
+                                      "tilt_deg", "touchdown")})        # touchdown: D20 only
             buf["rewards"].append(torch.as_tensor(r, dtype=torch.float32, device=dev))
             buf["terminated"].append(torch.as_tensor(te, dtype=torch.float32, device=dev))
             buf["truncated"].append(torch.as_tensor(tr, dtype=torch.float32, device=dev))

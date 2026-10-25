@@ -16,8 +16,23 @@ Table III terms, [x]_a^b = clip(x, a, b):
 d = horizontal CoM-to-pad-centre distance; dz = z_pad_top - z_CoM (D4: negative while
 above); v_z = drone world vertical velocity (true state).
 r_active (Sec. III-C) is added by the trainer in Block 13 (it needs L_est at t+1).
+
+TouchdownReward (SPEC D21, agreed 25 Oct 2026; needs the D20 hold, hold_steps > 0):
+  flight            Table III terms as above (+ flare term in v3)
+  soft touchdown    0 (the step where the hold starts)
+  each hold step    -min(1, |v_drone - v_pad_surface|)   (Table III terms OFF: D3 would
+                                                           charge 0.25 per step for resting)
+  hold success      +10
+  hard_landing      v1, v3: -10;  v2: -min(10, 5 (|impact v_z| - 1))
+  bounce / slide_off / tip_over / not_still / crash / tilt / drift   -10
+  v3 flare (flight, horizontal distance <= 1.5 m):
+    -min(1, max(0, -v_z - v_ref)),  v_ref = 0.8 + 1.0 * max(0, h),  h = CoM height above the
+    pad top (= -dz). The allowed descent speed shrinks linearly with height (bio-inspired:
+    descent speed proportional to height, as in landing honeybees and pigeons).
 """
 import numpy as np
+
+from .landing_sim import V_IMP
 
 W = dict(lateral=1.0, vertical=1.0, vz=0.5, undershoot=1.0, yaw=2.0)
 R_SUCCESS, R_CRASH = 10.0, -10.0
@@ -74,3 +89,59 @@ class ShinReward:
         if outcome in CRASH_OUTCOMES:
             return R_CRASH
         return sum(terms.values())         # includes the timeout (truncated) step
+
+
+# ---- SPEC D21: touchdown-aware reward ------------------------------------------------
+HOLD_FAIL_OUTCOMES = ("bounce", "slide_off", "tip_over", "not_still")
+FLARE_V0 = 0.8          # m/s, allowed descent speed at the pad top
+FLARE_K = 1.0           # 1/s, + 1 m/s of allowed descent per metre of height
+FLARE_D = 1.5           # m, horizontal distance within which the flare term applies
+W_FLARE = 1.0
+HARD_K = 5.0            # v2: penalty per m/s of impact speed above V_IMP
+VARIANTS = ("v1", "v2", "v3")
+
+
+def flare_term(d, dz, vz):
+    """Unweighted v3 term (<= 0). d: horizontal distance (m), dz = z_pad_top - z_CoM (D4),
+    vz: drone vertical velocity (m/s, + up)."""
+    if d > FLARE_D:
+        return 0.0
+    v_ref = FLARE_V0 + FLARE_K * max(0.0, -dz)
+    return -min(1.0, max(0.0, -vz - v_ref))
+
+
+def hard_landing_reward(variant, impact_vz):
+    if variant == "v2":
+        return -min(10.0, HARD_K * (abs(float(impact_vz)) - V_IMP))
+    return R_CRASH
+
+
+class TouchdownReward(ShinReward):
+    """Reward for the D20 hold task. variant: 'v1' (terminal changes only), 'v2' (+ graded
+    hard landing), 'v3' (+ flare term before contact)."""
+
+    def __init__(self, variant, vz_penalty="literal"):
+        super().__init__(vz_penalty)
+        assert variant in VARIANTS, variant
+        self.variant = variant
+
+    def __call__(self, env, info):
+        d, dz, vz = geometry(env.sim)
+        terms = shaping_terms(self.d_prev, d, self.adz_prev, abs(dz), dz, vz,
+                              info["action_cmd"][3], self.vz_penalty)
+        if self.variant == "v3":
+            terms["flare"] = W_FLARE * flare_term(d, dz, vz)
+        self.d_prev, self.adz_prev = d, abs(dz)
+        outcome = info.get("outcome")
+        if outcome is None and info.get("phase") == "hold":
+            r = 0.0 if info.get("hold_t", 0) == 0 else -min(1.0, env.sim.hold_vrel())
+            info["reward_terms"] = dict(hold=r)
+            return r
+        info["reward_terms"] = terms
+        if outcome == "success":
+            return R_SUCCESS
+        if outcome == "hard_landing":
+            return hard_landing_reward(self.variant, info["rel_vel"][2])
+        if outcome in CRASH_OUTCOMES or outcome in HOLD_FAIL_OUTCOMES:
+            return R_CRASH
+        return sum(terms.values())         # flight, including the timeout step

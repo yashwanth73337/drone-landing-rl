@@ -1303,3 +1303,25 @@ Caveats: one seed per comparison; four learning-rate restarts on seed 1; no pair
   89.5% [87.4, 91.3]; safe landing 0.0% [0.0, 0.4]. Of 895 touchdowns, 888 hard
   landings (median impact v_z -3.33 m/s) and 7 soft touchdowns, all 7 tipped over
   during the hold.
+
+### D21 (25 Oct 2026): touchdown-aware reward (TouchdownReward v1 / v2 / v3)
+
+- Uses the D20 hold. train_ppo --reward v1|v2|v3 switches the hold on (10 steps);
+  --reward paper (default) is unchanged.
+- Flight: Table III terms. Soft touchdown step: 0. Each hold step: -min(1, |v_rel|),
+  Table III terms off (literal D3 would charge 0.25 per step for resting).
+  Hold success +10. Hard landing: v1, v3 -10; v2 -min(10, 5 (|impact v_z| - 1)).
+  Hold failures, crashes, tilt, drift: -10.
+- v3 adds a flare term in flight within 1.5 m horizontally:
+  -min(1, max(0, -v_z - v_ref)), v_ref = 0.8 + 1.0 * max(0, h), h = CoM height above the pad top.
+- Hovering stays unattractive: literal D3 charges 0.25 per step (about -24 discounted
+  over a full episode) vs -10 for a crash.
+- Tests: test_block16_touchdown_reward.py (22); 211 pass.
+- P baseline retrained on the laptop in the D19 sim (desktop P checkpoints were never
+  copied): P_base_s1, paper reward, seed 1, 2M steps, about 23 min at ~1,470 sps.
+  c = 1, 1000 pinned episodes: 80.9% [78.3, 83.2] (old sim P_smoke_vz1_s1: 81.5%);
+  impact v_z median -2.18. Hold task: safe 0.0%; 797 hard landings; 12 soft
+  touchdowns (9 slide_off, 3 tip_over).
+- Screening plan: fine-tune P_base_s1 at L80 for ~1M steps with v1, v2, v3 (seed 1 each).
+  DEVIATION: learning rate restarts at 1.0e-4 and decays to 0 (same pattern as earlier
+  continuations).

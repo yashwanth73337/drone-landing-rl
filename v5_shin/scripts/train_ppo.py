@@ -5,6 +5,8 @@ Usage (from the repo root). DO NOT start a run without the supervisor/owner's go
   python -m v5_shin.scripts.train_ppo --mode vision --name A_s1 --seed 1 --total-steps 20000000
   --motor {asym,sym_slow,sym_fast}: motor time constants (default asym = AerialGym LMF2, the
   paper's setting). sym_* are DIAGNOSTIC ablations of the actuator sink (SPEC §15, 1 Oct).
+  --reward {paper,v1,v2,v3}: paper = Table III (default). v1/v2/v3 = touchdown-aware reward
+  (SPEC D21) and they switch on the post-touchdown hold (SPEC D20); success = safe landing.
 
 Outputs in v5_shin/runs/<name>/:
   config.json            every argument + versions (tracked)
@@ -26,7 +28,8 @@ import torch
 
 from v5_shin.envs.curriculum import Curriculum
 from v5_shin.envs.dr import DRConfig
-from v5_shin.envs.reward import ShinReward
+from v5_shin.envs import landing_sim as LS
+from v5_shin.envs.reward import ShinReward, TouchdownReward
 from v5_shin.envs.shin_env import VZ_MAX_DEFAULT, ShinLandingEnv
 from v5_shin.policies.active_perception import ActivePerceptionReward
 from v5_shin.policies.ppo import PPOConfig, PPOTrainer
@@ -35,17 +38,21 @@ RUNS = os.path.join(os.path.dirname(__file__), "..", "runs")
 
 
 def make_env_fn(mode, seed, renderer, vz_penalty, c, dr_off=False, vz_max=VZ_MAX_DEFAULT,
-                motor_mode="asym"):
+                motor_mode="asym", reward="paper"):
+    hold = reward != "paper"                     # D20 hold goes with the D21 reward
     def f():
+        rf = TouchdownReward(reward, vz_penalty) if hold else ShinReward(vz_penalty)
         return ShinLandingEnv(mode=mode, renderer=renderer, egl=(renderer == "egl"), seed=seed, c=c,
-                              reward_fn=ShinReward(vz_penalty), vz_max=vz_max,
-                              dr=DRConfig.off() if dr_off else DRConfig(), motor_mode=motor_mode)
+                              reward_fn=rf, vz_max=vz_max,
+                              dr=DRConfig.off() if dr_off else DRConfig(), motor_mode=motor_mode,
+                              hold_steps=(LS.HOLD_STEPS if hold else 0))
     return f
 
 
 def make_venv(mode, n_envs, seed, renderer, vz_penalty, c, sync=False, dr_off=False,
-              vz_max=VZ_MAX_DEFAULT, motor_mode="asym"):
-    fns = [make_env_fn(mode, seed * 1000 + i, renderer, vz_penalty, c, dr_off, vz_max, motor_mode)
+              vz_max=VZ_MAX_DEFAULT, motor_mode="asym", reward="paper"):
+    fns = [make_env_fn(mode, seed * 1000 + i, renderer, vz_penalty, c, dr_off, vz_max, motor_mode,
+                       reward)
            for i in range(n_envs)]
     kw = dict(autoreset_mode=gym.vector.AutoresetMode.SAME_STEP)
     if sync:
@@ -68,13 +75,16 @@ class CSVLog:
         self.f.flush()
 
 
-def episode_row(e, update, level):
+def episode_row(e, update, level, hold=False):
     rv = e.get("rel_vel")
-    return dict(update=update, level=level, outcome=e["outcome"], steps=e["t"],
-                c_episode=e["c_episode"], com_over_pad=e.get("com_over_pad"),
-                impact_vz=(float(rv[2]) if rv is not None else None),
-                impact_speed=(float(np.linalg.norm(rv)) if rv is not None else None),
-                tilt_deg=e.get("tilt_deg"))
+    row = dict(update=update, level=level, outcome=e["outcome"], steps=e["t"],
+               c_episode=e["c_episode"], com_over_pad=e.get("com_over_pad"),
+               impact_vz=(float(rv[2]) if rv is not None else None),
+               impact_speed=(float(np.linalg.norm(rv)) if rv is not None else None),
+               tilt_deg=e.get("tilt_deg"))
+    if hold:                                     # extra column only for D20 runs
+        row["touchdown"] = bool(e.get("touchdown"))
+    return row
 
 
 def main():
@@ -100,12 +110,15 @@ def main():
                     help="vertical-speed action limit (m/s); D16 default 1.0 (P_smoke_s1 used 3.0)")
     ap.add_argument("--motor", choices=["asym", "sym_slow", "sym_fast"], default="asym",
                     help="motor time constants; asym = AerialGym LMF2 (default); sym_* = diagnostic")
+    ap.add_argument("--reward", choices=["paper", "v1", "v2", "v3"], default="paper",
+                    help="paper = Table III; v1/v2/v3 = touchdown-aware (D21) with the hold (D20)")
     ap.add_argument("--renderer", choices=["egl", "tiny"], default="egl")
     ap.add_argument("--start-level", type=int, default=10)
     ap.add_argument("--ckpt-every", type=int, default=50, help="updates")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--resume", action="store_true", help="continue from runs/<name>/latest.pt")
     a = ap.parse_args()
+    hold = a.reward != "paper"
 
     run = os.path.join(RUNS, a.name)
     os.makedirs(run, exist_ok=True)
@@ -119,7 +132,7 @@ def main():
                     lambda_est=(a.lambda_est if a.mode == "vision" else 0.0))
     cur = Curriculum(start_level=a.start_level)
     venv = make_venv(a.mode, a.n_envs, a.seed, a.renderer, a.vz_penalty, cur.c, vz_max=a.vz_max,
-                     motor_mode=a.motor)
+                     motor_mode=a.motor, reward=a.reward)
     use_ra = a.r_active == "auto" and a.mode == "vision" and cfg.lambda_est > 0
     tr = PPOTrainer(venv, cfg, device=a.device, total_updates=total_updates,
                     r_active_fn=ActivePerceptionReward() if use_ra else None)
@@ -131,7 +144,7 @@ def main():
     if not a.resume or not os.path.exists(os.path.join(run, "config.json")):
         with open(os.path.join(run, "config.json"), "w") as f:
             json.dump(dict(vars(a), micro_chunks_used=micro, total_updates=total_updates,
-                           r_active_used=use_ra,
+                           r_active_used=use_ra, hold_steps=(LS.HOLD_STEPS if hold else 0),
                            ppo=vars(cfg), host=pyplatform.node(), torch=torch.__version__,
                            gymnasium=gym.__version__,
                            gpu=(torch.cuda.get_device_name(0) if torch.cuda.is_available() else None)),
@@ -148,7 +161,7 @@ def main():
             t_roll = time.time() - t_roll
             level_before = cur.level
             for e in eps:
-                ep_log.write(episode_row(e, tr.update, cur.level))
+                ep_log.write(episode_row(e, tr.update, cur.level, hold))
                 if cur.record(e["outcome"] == "success", e["c_episode"]):
                     venv.call("set_c", cur.c)
             for h in cur.history[n_hist:]:
@@ -159,6 +172,12 @@ def main():
             t_learn = time.time() - t_learn
             outc = [e["outcome"] for e in eps]
             succ = [e for e in eps if e["outcome"] == "success"]
+            hold_cols = {}
+            if hold:
+                td = [e for e in eps if e.get("touchdown")]
+                hold_cols = {f"n_{k}": outc.count(k) for k in LS.HOLD_OUTCOMES}
+                hold_cols.update(n_touchdown=len(td), td_impact_vz_mean=(
+                    float(np.mean([e["rel_vel"][2] for e in td])) if td else None))
             row = dict(update=tr.update, global_step=tr.global_step, wall_s=round(time.time() - t0, 1),
                        sps=round(per_update / max(t_roll + t_learn, 1e-9), 1),
                        rollout_s=round(t_roll, 2), learn_s=round(t_learn, 2),
@@ -172,7 +191,7 @@ def main():
                        reward_mean=float(buf["rewards"].mean()),
                        r_active_mean=float(buf["r_active"].mean()),
                        r_active_frac=buf.get("r_active_frac"),
-                       **stats)
+                       **hold_cols, **stats)
             if a.mode == "vision":
                 row.update(tr.estimate_error_by_blind_age(buf))
             upd_log.write(row)
@@ -184,6 +203,9 @@ def main():
                   f"est {stats['est']:.3f}"
                   + (f" ra {row['r_active_frac']:.2f}/{row['r_active_mean']:+.4f}"
                      if row["r_active_frac"] is not None else "")
+                  + (f" | td {row['n_touchdown']:3d} hard {row['n_hard_landing']:3d} "
+                     f"hfail {sum(row['n_' + k] for k in ('bounce', 'slide_off', 'tip_over', 'not_still')):3d}"
+                     if hold else "")
                   + f" | {row['sps']:.0f} sps", flush=True)
             extra = dict(curriculum=cur.state_dict())
             if tr.update % a.ckpt_every == 0 or tr.update == total_updates:
