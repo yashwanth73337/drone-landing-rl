@@ -1284,3 +1284,22 @@ Caveats: one seed per comparison; four learning-rate restarts on seed 1; no pair
   are kept as history; baselines are re-evaluated in the D19 sim before comparison.
 - First attempt (velocity without reordering) rejected: PyBullet advanced the pad
   one extra substep, so the camera saw it up to 8 cm ahead.
+
+### D20 (25 Oct 2026): post-touchdown hold (safe-landing success)
+
+- Owner's definition: a safe landing is slow, the drone's velocity relative to the
+  pad becomes zero, and it stays on the pad. The policy keeps control during the hold.
+- LandingSim(hold_steps=0) is the paper's task, unchanged. With hold_steps = 10 the
+  first pad-top contact is a touchdown: |impact v_z rel. pad| > 1.0 m/s -> hard_landing;
+  otherwise 10 policy steps (1 s) of hold. Hold failures: bounce (no top contact for a
+  whole policy step), slide_off (CoM leaves the pad square), tip_over (tilt > 30 deg),
+  crash_platform / crash_ground. End of hold: success if |v_drone - v_pad_surface|
+  <= 0.1 m/s in each of the last 5 steps, else not_still. The 300-step horizon applies
+  to flight only.
+- evaluate.py --hold: success = safe landing; touchdown_rate = the paper's success on
+  the same episodes; folder suffix _hold. Reward and training are unchanged (not decided).
+- Tests: test_block15_hold.py (11); 189 pass.
+- Baseline A_s2_cont5, c = 1, 1000 pinned episodes, D19 sim: touchdown (paper metric)
+  89.5% [87.4, 91.3]; safe landing 0.0% [0.0, 0.4]. Of 895 touchdowns, 888 hard
+  landings (median impact v_z -3.33 m/s) and 7 soft touchdowns, all 7 tipped over
+  during the hold.

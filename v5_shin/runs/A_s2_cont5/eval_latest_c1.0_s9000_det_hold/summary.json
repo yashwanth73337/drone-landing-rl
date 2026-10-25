@@ -1,0 +1,97 @@
+{
+  "run": "A_s2_cont5",
+  "ckpt": "latest.pt",
+  "timestep": 26001408,
+  "c": 1.0,
+  "episodes": 1000,
+  "seed_base": 9000,
+  "policy": "deterministic(mean)",
+  "renderer": "tiny",
+  "vz_max": 1.0,
+  "mode": "vision",
+  "motor": "asym",
+  "trained_motor": "asym",
+  "inject_true_state": false,
+  "success_rate": 0.0,
+  "success_ci95": [
+    0.0,
+    0.003826898586390522
+  ],
+  "strict_success_rate": 0.0,
+  "strict_ci95": [
+    0.0,
+    0.003826898586390522
+  ],
+  "outcomes": {
+    "success": 0,
+    "crash_ground": 48,
+    "crash_platform": 29,
+    "tilt": 21,
+    "drift": 7,
+    "timeout": 0,
+    "hard_landing": 888,
+    "bounce": 0,
+    "slide_off": 0,
+    "tip_over": 7,
+    "not_still": 0
+  },
+  "impact_vz_median": NaN,
+  "impact_vz_p10": NaN,
+  "impact_vz_p90": NaN,
+  "impact_speed_median": null,
+  "steps_to_land_median": null,
+  "safe_success": {
+    "<=0.5": 0.0,
+    "<=1.0": 0.0,
+    "<=1.5": 0.0,
+    "<=2.0": 0.0
+  },
+  "safe_strict_success": {
+    "<=0.5": 0.0,
+    "<=1.0": 0.0,
+    "<=1.5": 0.0,
+    "<=2.0": 0.0
+  },
+  "cmd_vz_last5_median": null,
+  "wall_s": 696.4,
+  "hold": {
+    "hold_steps": 10,
+    "hold_still_steps": 5,
+    "v_imp": 1.0,
+    "v_still": 0.1,
+    "hold_tilt_max_deg": 29.999999999999996
+  },
+  "touchdown_rate": 0.895,
+  "touchdown_ci95": [
+    0.8744642376371892,
+    0.9125125124795623
+  ],
+  "touchdown_impact_vz_median": -3.3278077535137816,
+  "touchdown_impact_vz_p10": -4.581747278141897,
+  "touchdown_impact_vz_p90": -2.2636088683874096,
+  "update": 6348,
+  "est_pos_rmse_m": 0.5949501395225525,
+  "est_vel_rmse_ms": 1.0047531127929688,
+  "est_pos_err_by_blind_age": {
+    "0-0": {
+      "n": 14931,
+      "mean_m": 0.16791541377712704
+    },
+    "1-15": {
+      "n": 11648,
+      "mean_m": 0.49638730666141545
+    },
+    "16-60": {
+      "n": 519,
+      "mean_m": 1.3727940442130286
+    },
+    "61-120": {
+      "n": 0,
+      "mean_m": null
+    },
+    "121-inf": {
+      "n": 0,
+      "mean_m": null
+    }
+  }
+}

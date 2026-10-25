@@ -10,6 +10,18 @@ Episode outcomes (SPEC §6):
   timeout          300 policy steps (truncation, not termination)
 Termination is checked after EVERY physics substep; the policy step ends
 early at the first terminal substep.
+
+Post-touchdown hold (SPEC D20; OFF by default, hold_steps=0 = the paper's task above).
+With hold_steps > 0 the first pad-top contact is a TOUCHDOWN, not the end:
+  hard_landing     |impact v_z relative to the pad| > V_IMP at touchdown (episode ends)
+  then the policy keeps flying for hold_steps policy steps:
+  bounce           no pad-top contact during a whole policy step
+  slide_off        CoM leaves the pad square (pad frame)
+  tip_over         tilt > HOLD_TILT_MAX
+  crash_platform / crash_ground   side or ground contact
+  success          hold completed and |v_rel| <= V_STILL in each of the last HOLD_STILL_STEPS
+  not_still        hold completed but that speed condition failed
+  The 300-step horizon applies to flight only; a hold may run up to hold_steps past it.
 """
 import numpy as np
 import pybullet as p
@@ -34,6 +46,19 @@ TILT_MAX = np.radians(80.0)     # [unspecified, SPEC §6]
 DRIFT_XY = 15.0                 # m                               [unspecified]
 DRIFT_Z = 12.0                  # m above the pad top             [unspecified]
 TOP_NORMAL_MIN = 0.7            # contactNormalOnB.z for "top face"
+# ---- SPEC D20: post-touchdown hold (agreed 24-25 Oct 2026) --------------------------
+HOLD_STEPS = 10                 # policy steps = 1 s (value used when the hold is on)
+HOLD_STILL_STEPS = 5            # last 0.5 s of the hold
+V_IMP = 1.0                     # m/s, max |impact v_z| relative to the pad
+V_STILL = 0.1                   # m/s, max |v_drone - v_pad_surface| when settled
+HOLD_TILT_MAX = np.radians(30.0)
+HOLD_OUTCOMES = ("hard_landing", "bounce", "slide_off", "tip_over", "not_still")
+
+
+def hold_verdict(vrel_hist, n=HOLD_STILL_STEPS, v_still=V_STILL):
+    """End-of-hold decision from the per-step relative speeds (m/s)."""
+    last = list(vrel_hist)[-n:]
+    return "success" if len(last) == n and max(last) <= v_still else "not_still"
 
 
 class LandingSim:
@@ -42,8 +67,9 @@ class LandingSim:
     off never changes the spawn / platform sequence of a pinned seed."""
 
     def __init__(self, renderer="tiny", egl=False, marker=True, gains_mode="random", seed=0,
-                 dr=None, motor_mode="asym", gui=False):
+                 dr=None, motor_mode="asym", gui=False, hold_steps=0):
         self.dr = dr if dr is not None else DR.DRConfig()
+        self.hold_steps = int(hold_steps)      # 0 = paper task (success at first top contact)
         self.motor_mode = motor_mode           # 'asym' always in training; others: diagnostic
         self._seed_streams(seed)
         self.cid = make_client(gui=gui, egl=egl)       # gui=True only for scripts/watch.py
@@ -124,6 +150,10 @@ class LandingSim:
         p.performCollisionDetection(physicsClientId=self.cid)
         self.t = 0
         self.done = False
+        self.phase = "flight"                  # "hold" after a soft touchdown (D20)
+        self.hold_t = 0
+        self._vrel_hist = []
+        self._td = None                        # touchdown_info at the touchdown substep
         self.spawn = sp
         return dict(spawn=sp, v0=v0, w0=w0, visual=dict(self.visual))
 
@@ -134,6 +164,8 @@ class LandingSim:
         assert not self.done, "call reset()"
         if self.dr.forces:          # Table II: resampled each (policy) step, held 0.1 s
             self.quad.ext_force[:], self.quad.ext_torque[:] = DR.sample_disturbance(self.rng_dr)
+        if self.phase == "hold":
+            return self._step_hold(cmd)
         outcome, sub = None, P.SUBSTEPS
         for k in range(P.SUBSTEPS):
             # velocities just before this substep: the contact solver zeroes the
@@ -148,16 +180,105 @@ class LandingSim:
                 sub = k + 1
                 break
         self.t += 1
+        if outcome == "success" and self.hold_steps > 0:     # D20: touchdown, not the end
+            self._td = self.touchdown_info(outcome)
+            if abs(self._td["rel_vel"][2]) > V_IMP:
+                outcome = "hard_landing"
+            else:
+                outcome = None
+                self.phase = "hold"
         if outcome is None:
             self.plat.perturb(self.rng)
             self.plat._sync()                            # new speed to the solver (SPEC D19)
         terminated = outcome is not None
-        truncated = (not terminated) and self.t >= HORIZON
+        truncated = (not terminated) and self.phase == "flight" and self.t >= HORIZON
         if truncated:
             outcome = "timeout"
         self.done = terminated or truncated
-        return terminated, truncated, dict(outcome=outcome, substeps=sub, t=self.t,
-                                           **self.touchdown_info(outcome))
+        if self.hold_steps == 0:                         # paper task: unchanged info
+            return terminated, truncated, dict(outcome=outcome, substeps=sub, t=self.t,
+                                               **self.touchdown_info(outcome))
+        info = dict(outcome=outcome, substeps=sub, t=self.t, phase=self.phase,
+                    touchdown=self._td is not None, hold_t=self.hold_t)
+        if self.done:
+            info.update(self._terminal_info(outcome))
+        return terminated, truncated, info
+
+    # ---- post-touchdown hold (D20) --------------------------------------------------
+    def _step_hold(self, cmd):
+        outcome, sub, top_seen = None, P.SUBSTEPS, False
+        for k in range(P.SUBSTEPS):
+            self._v_pre = self.quad.state()["v"]
+            self._vplat_pre = self.plat.velocity()
+            self.quad.apply_control(cmd)
+            p.stepSimulation(physicsClientId=self.cid)
+            self.plat.integrate()
+            outcome, top = self.check_hold()
+            top_seen = top_seen or top
+            if outcome is not None:
+                sub = k + 1
+                break
+        self.t += 1
+        if outcome is None and not top_seen:
+            outcome = "bounce"
+        if outcome is None:
+            self.hold_t += 1
+            self._vrel_hist.append(self.hold_vrel())
+            if self.hold_t >= self.hold_steps:
+                outcome = hold_verdict(self._vrel_hist)
+        if outcome is None:
+            self.plat.perturb(self.rng)
+            self.plat._sync()
+        self.done = outcome is not None
+        info = dict(outcome=outcome, substeps=sub, t=self.t, phase="hold",
+                    touchdown=True, hold_t=self.hold_t)
+        if self.done:
+            info.update(self._terminal_info(outcome))
+        return self.done, False, info
+
+    def check_hold(self):
+        """(outcome or None, pad-top contact this substep). Precedence: side-only
+        contact, ground, tip-over, slide-off."""
+        cid, drone = self.cid, self.quad.body
+        top = side = False
+        for c in p.getContactPoints(bodyA=drone, bodyB=self.plat.body, physicsClientId=cid):
+            if c[7][2] >= TOP_NORMAL_MIN:
+                top = True
+            else:
+                side = True
+        if side and not top:
+            return "crash_platform", top
+        if p.getContactPoints(bodyA=drone, bodyB=self.ground.body, physicsClientId=cid):
+            return "crash_ground", top
+        s = self.quad.state()
+        if np.arccos(np.clip(s["R"][2, 2], -1, 1)) > HOLD_TILT_MAX:
+            return "tip_over", top
+        if not self._com_over_pad(s["pos"]):
+            return "slide_off", top
+        return None, top
+
+    def _com_over_pad(self, pos):
+        rel = pos - self.plat.pad_center()
+        c, sn = np.cos(self.plat.psi), np.sin(self.plat.psi)
+        rel_pad = np.array([c * rel[0] + sn * rel[1], -sn * rel[0] + c * rel[1]])
+        return bool(np.all(np.abs(rel_pad) <= PAD_SIZE / 2))
+
+    def hold_vrel(self):
+        """|v_drone - v_pad_surface| (m/s); the surface velocity includes the pad's yaw rate."""
+        s = self.quad.state()
+        r = s["pos"] - self.plat.pad_center()
+        w = self.plat.w
+        v_surf = self.plat.velocity() + np.array([-w * r[1], w * r[0], 0.0])
+        return float(np.linalg.norm(s["v"] - v_surf))
+
+    def _terminal_info(self, outcome):
+        """After a touchdown, report the TOUCHDOWN (impact) info plus the hold summary;
+        before one, the usual terminal info."""
+        if self._td is None:
+            return self.touchdown_info(outcome)
+        last = self._vrel_hist[-HOLD_STILL_STEPS:]
+        return dict(self._td, hold_steps_done=self.hold_t,
+                    hold_vrel_max_last=(float(max(last)) if last else float("nan")))
 
     def check_termination(self):
         cid, drone = self.cid, self.quad.body

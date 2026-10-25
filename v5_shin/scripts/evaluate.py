@@ -24,6 +24,10 @@ True-state injection (--inject-true-state, vision only, evaluation diagnostic): 
   LSTM, the other 250 latent dims) is unchanged. Estimate metrics still report the estimator.
   Output folder suffix: _injtrue.
 
+Post-touchdown hold (--hold, SPEC D20): the episode continues after the first pad-top contact
+  (landing_sim.HOLD_STEPS policy steps). success = safe landing (soft touchdown, stays on, settles);
+  touchdown_rate = the paper's success (first contact on the pad top). Output folder suffix: _hold.
+
 Usage:
   python -m v5_shin.scripts.evaluate --run P_smoke_s1 --ckpt latest.pt --episodes 1000 --c 1.0
   python -m v5_shin.scripts.evaluate --run P_smoke_vz1_s1 --c 1.0 --motor sym_slow
@@ -58,7 +62,7 @@ def wilson(k, n, z=1.96):
 
 
 def _worker(args):
-    ckpt_path, cfg, seeds, c, stochastic, renderer, motor, inject = args
+    ckpt_path, cfg, seeds, c, stochastic, renderer, motor, inject, hold_steps = args
     from v5_shin.envs.reward import ShinReward
     from v5_shin.envs.shin_env import ShinLandingEnv
     from v5_shin.policies.shin_policy import ShinPolicy
@@ -70,7 +74,7 @@ def _worker(args):
     pol.eval()
     env = ShinLandingEnv(mode=mode, renderer=renderer, egl=(renderer == "egl"), seed=0, c=c,
                          reward_fn=ShinReward(cfg.get("vz_penalty", "literal")),
-                         vz_max=cfg.get("vz_max", 3.0), motor_mode=motor)
+                         vz_max=cfg.get("vz_max", 3.0), motor_mode=motor, hold_steps=hold_steps)
     keys = ("image", "u", "critic", "target", "s_rel") if mode == "vision" else ("u", "critic", "target", "s_rel")
     rows, frames = [], []
     try:
@@ -107,21 +111,28 @@ def _worker(args):
             sp = env.sim.spawn
             rv = info.get("rel_vel", np.full(3, np.nan))
             rp = info.get("rel_pos_pad", np.full(2, np.nan))
-            rows.append(dict(seed=seed, outcome=info["outcome"], steps=k, ret=ret,
-                             com_over_pad=bool(info.get("com_over_pad", False)),
-                             impact_vz=float(rv[2]), impact_speed=float(np.linalg.norm(rv)),
-                             touch_x_pad=float(rp[0]), touch_y_pad=float(rp[1]),
-                             tilt_deg=float(info.get("tilt_deg", np.nan)),
-                             cmd_vz_last=cmd_vz[-1], cmd_vz_last5=float(np.mean(cmd_vz[-5:])),
-                             dz0=float(sp["dxyz0"][2]), d0=float(np.hypot(*sp["dxyz0"][:2])),
-                             v_plat0=float(env.sim.plat.v)))
+            row = dict(seed=seed, outcome=info["outcome"], steps=k, ret=ret,
+                       com_over_pad=bool(info.get("com_over_pad", False)),
+                       impact_vz=float(rv[2]), impact_speed=float(np.linalg.norm(rv)),
+                       touch_x_pad=float(rp[0]), touch_y_pad=float(rp[1]),
+                       tilt_deg=float(info.get("tilt_deg", np.nan)),
+                       cmd_vz_last=cmd_vz[-1], cmd_vz_last5=float(np.mean(cmd_vz[-5:])),
+                       dz0=float(sp["dxyz0"][2]), d0=float(np.hypot(*sp["dxyz0"][:2])),
+                       v_plat0=float(env.sim.plat.v))
+            if hold_steps:                                # D20 columns only for --hold
+                row.update(touchdown=bool(info.get("touchdown", False)),
+                           hold_steps_done=int(info.get("hold_steps_done", 0)),
+                           hold_vrel_max_last=float(info.get("hold_vrel_max_last", np.nan)))
+            rows.append(row)
     finally:
         env.close()
     return rows, frames
 
 
 def evaluate(run, ckpt, episodes=1000, c=1.0, seed_base=9000, workers=8, stochastic=False,
-             renderer="tiny", out=None, motor=None, inject_true_state=False):
+             renderer="tiny", out=None, motor=None, inject_true_state=False, hold=False):
+    from v5_shin.envs import landing_sim as LS
+    hold_steps = LS.HOLD_STEPS if hold else 0
     run_dir = os.path.join(RUNS, run)
     cfg = json.load(open(os.path.join(run_dir, "config.json")))
     trained_motor = cfg.get("motor", "asym")
@@ -132,8 +143,8 @@ def evaluate(run, ckpt, episodes=1000, c=1.0, seed_base=9000, workers=8, stochas
         raise ValueError("--inject-true-state needs a vision run (variant P already sees the true state)")
     seeds = [seed_base + i for i in range(episodes)]
     chunks = [seeds[i::workers] for i in range(workers) if seeds[i::workers]]
-    args = [(os.path.join(run_dir, ckpt), cfg, ch, c, stochastic, renderer, motor, inject_true_state)
-            for ch in chunks]
+    args = [(os.path.join(run_dir, ckpt), cfg, ch, c, stochastic, renderer, motor, inject_true_state,
+             hold_steps) for ch in chunks]
     t0 = time.time()
     if len(args) == 1:
         res = [_worker(args[0])]
@@ -143,8 +154,10 @@ def evaluate(run, ckpt, episodes=1000, c=1.0, seed_base=9000, workers=8, stochas
     rows = sorted([r for rr, _ in res for r in rr], key=lambda r: r["seed"])
     frames = [f for _, ff in res for f in ff]
     n = len(rows)
-    oc = {k: sum(r["outcome"] == k for r in rows) for k in
-          ("success", "crash_ground", "crash_platform", "tilt", "drift", "timeout")}
+    oc_keys = ("success", "crash_ground", "crash_platform", "tilt", "drift", "timeout")
+    if hold:
+        oc_keys += LS.HOLD_OUTCOMES
+    oc = {k: sum(r["outcome"] == k for r in rows) for k in oc_keys}
     succ = [r for r in rows if r["outcome"] == "success"]
     strict = sum(r["com_over_pad"] for r in succ)
     vz = np.array([r["impact_vz"] for r in succ]) if succ else np.array([np.nan])
@@ -163,6 +176,16 @@ def evaluate(run, ckpt, episodes=1000, c=1.0, seed_base=9000, workers=8, stochas
                                                    for r in succ) / n for t in SAFE_VZ},
                 cmd_vz_last5_median=float(np.median([r["cmd_vz_last5"] for r in succ])) if succ else None,
                 wall_s=round(time.time() - t0, 1))
+    if hold:
+        td = [r for r in rows if r["touchdown"]]
+        tvz = np.array([r["impact_vz"] for r in td]) if td else np.array([np.nan])
+        summ.update(hold=dict(hold_steps=LS.HOLD_STEPS, hold_still_steps=LS.HOLD_STILL_STEPS,
+                              v_imp=LS.V_IMP, v_still=LS.V_STILL,
+                              hold_tilt_max_deg=float(np.degrees(LS.HOLD_TILT_MAX))),
+                    touchdown_rate=len(td) / n, touchdown_ci95=wilson(len(td), n),
+                    touchdown_impact_vz_median=float(np.median(tvz)),
+                    touchdown_impact_vz_p10=float(np.percentile(tvz, 10)),
+                    touchdown_impact_vz_p90=float(np.percentile(tvz, 90)))
     try:
         d = torch.load(os.path.join(run_dir, ckpt), map_location="cpu", weights_only=False)
         summ["timestep"] = int(d.get("global_step", -1))
@@ -184,6 +207,8 @@ def evaluate(run, ckpt, episodes=1000, c=1.0, seed_base=9000, workers=8, stochas
         tag += f"_{motor}"
     if inject_true_state:
         tag += "_injtrue"
+    if hold:
+        tag += "_hold"
     out = out or os.path.join(run_dir, tag)
     os.makedirs(out, exist_ok=True)
     with open(os.path.join(out, "episodes.csv"), "w", newline="") as f:
@@ -209,16 +234,20 @@ def main():
                     help="vision only: feed the decision layer the true s_rel instead of the estimate")
     ap.add_argument("--motor", choices=MOTOR_MODES, default=None,
                     help="motor time constants (default: as trained, from config.json)")
+    ap.add_argument("--hold", action="store_true",
+                    help="D20: continue after touchdown; success = safe landing (hold)")
     a = ap.parse_args()
     for c in a.c:
         s, _ = evaluate(a.run, a.ckpt, a.episodes, c, a.seed_base, a.workers, a.stochastic, a.renderer,
-                        motor=a.motor, inject_true_state=a.inject_true_state)
+                        motor=a.motor, inject_true_state=a.inject_true_state, hold=a.hold)
         show = {k: s[k] for k in ("run", "ckpt", "timestep", "c", "episodes", "policy", "motor", "trained_motor", "inject_true_state",
                                   "success_rate", "success_ci95", "strict_success_rate", "outcomes",
                                   "impact_vz_median", "impact_vz_p10", "impact_vz_p90",
                                   "cmd_vz_last5_median", "safe_success", "safe_strict_success",
                                   "steps_to_land_median", "wall_s")}
-        for k in ("est_pos_rmse_m", "est_vel_rmse_ms", "est_pos_err_by_blind_age"):
+        for k in ("hold", "touchdown_rate", "touchdown_ci95", "touchdown_impact_vz_median",
+                  "touchdown_impact_vz_p10", "touchdown_impact_vz_p90",
+                  "est_pos_rmse_m", "est_vel_rmse_ms", "est_pos_err_by_blind_age"):
             if k in s:
                 show[k] = s[k]
         print(json.dumps(show, indent=1))
