@@ -14,6 +14,11 @@ Action: Box(-1, 1, (4,)) -> heading-frame [vx, vy, vz, yaw_rate] =
         vz_max = 1.0 m/s by default (D16, inferred from Fig. 9 descents <= ~1 m/s);
         P_smoke_s1 used 3.0 and dived at ~4 m/s impact.
 
+Hold sit-down (SPEC D23, hold_vz_down=None = off): while the sim is in the hold phase, a negative
+        vertical action is scaled by hold_vz_down (m/s) instead of vz_max, so the controller can
+        cut thrust and the drone's weight goes onto the pad (more friction). Flight is unchanged.
+Smooth pad (SPEC D23, pad_smooth=False = off): see LandingSim.
+
 Reward: reward_fn="paper" (default) -> envs.reward.ShinReward() (Table III, D3, D4);
         a callable with reset(env) and __call__(env, info); or None -> 0.0 (tests only).
 Rendering: exactly one render per reset() and per step() in vision modes; none for P.
@@ -51,10 +56,13 @@ class ShinLandingEnv(gym.Env):
 
     def __init__(self, mode="vision", c=1.0, seed=0, renderer="egl", egl=None, dr=None,
                  reward_fn="paper", gains_mode="random", vz_max=VZ_MAX_DEFAULT,
-                 motor_mode="asym", gui=False, hold_steps=0, hold_practice=0.0):
+                 motor_mode="asym", gui=False, hold_steps=0, hold_practice=0.0,
+                 hold_vz_down=None, pad_smooth=False):
         assert mode in ACTOR_KEYS, mode
         assert 0.0 <= hold_practice <= 1.0 and (hold_practice == 0.0 or hold_steps > 0)
         self.hold_practice = float(hold_practice)      # D22: share of on-pad starts (training)
+        assert hold_vz_down is None or hold_vz_down >= vz_max
+        self.hold_vz_down = hold_vz_down               # D23: m/s, downward limit in the hold
         self.mode = mode
         self.c = float(c)
         if reward_fn == "paper":
@@ -69,6 +77,7 @@ class ShinLandingEnv(gym.Env):
                               motor_mode=motor_mode, gui=gui,  # motor_mode: eval diagnostic; gui: viewer only
                               hold_steps=hold_steps)           # D20: 0 = paper task (no hold)
         self.action_scale = action_scale(vz_max)
+        self.sim.pad_smooth = bool(pad_smooth)         # D23
         f32 = np.float32
         self.observation_space = spaces.Dict({
             "image": spaces.Box(0, 255, (OBS_H, OBS_W), np.uint8),
@@ -102,13 +111,24 @@ class ShinLandingEnv(gym.Env):
 
     def step(self, action):
         a = np.clip(np.asarray(action, dtype=np.float64), -1.0, 1.0)
-        terminated, truncated, info = self.sim.step(a * self.action_scale)
+        cmd = a * self.current_action_scale(a)
+        terminated, truncated, info = self.sim.step(cmd)
         obs, extra = self._obs()
         info.update(extra)
-        info["action_cmd"] = a * self.action_scale
+        info["action_cmd"] = cmd
         info["c_episode"] = self.c_episode
         reward = float(self.reward_fn(self, info)) if self.reward_fn is not None else 0.0
         return obs, reward, terminated, truncated, info
+
+    def current_action_scale(self, a=None):
+        """Scale for action a (clipped to [-1, 1]) at the current state. D23: in the hold phase a
+        negative vertical action uses hold_vz_down instead of vz_max."""
+        sc = self.action_scale
+        if (self.hold_vz_down is not None and getattr(self.sim, "phase", "flight") == "hold"
+                and (a is None or a[2] < 0)):
+            sc = sc.copy()
+            sc[2] = float(self.hold_vz_down)
+        return sc
 
     # ---- observation -----------------------------------------------------------------
     def _obs(self):

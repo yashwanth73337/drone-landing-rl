@@ -1353,3 +1353,33 @@ Caveats: one seed per comparison; four learning-rate restarts on seed 1; no pair
 - Tests: test_block17_hold_practice.py (27); 238 pass.
 - Planned run: P_td_v4p_s1 = v4 + practice 0.25, from P_base_s1, +2M steps. DEVIATION: learning
   rate restarts at 1.5e-4 and decays to 0.
+
+### D23 (26 Oct 2026): hold diagnostics; smooth pad option (A) and sit-down option (B)
+
+- P_td_v4p_s1 (v4 + practice 0.25, +2M steps from P_base_s1): 0 practice holds succeeded in the
+  last updates (pr 0/35). Hold judged infeasible as set up, not a reward problem.
+- diag_hold.py (evaluation only): starts on the pad, flies the hold with the policy or an oracle that
+  commands the pad-surface velocity at the end of each step. Still pad, no push forces: oracle
+  200/200. Moving pad (c 0.5, 1): oracle 0-10/200, end-of-hold |v_rel| 0.24-0.70 m/s.
+- A, pad_smooth (off by default): each pad speed change spread over the 0.1 s step; the random walk
+  and the v, w at every 0.1 s mark are unchanged (tested). Result: no effect on the oracle. Kept off.
+- B, hold_vz_down (off by default; train_ppo --hold-vz-down): in the hold, a negative vertical action
+  is scaled to hold_vz_down m/s instead of vz_max, so the controller can cut thrust and the weight
+  rests on the legs. Flight unchanged. Oracle at -5 m/s: c = 0.5 183-194/200 (was 3-10);
+  c = 1 9-15/200, limited by friction (see D24). Real precedent: DART (Univ. of Sherbrooke) pushes
+  the drone onto the vehicle with reverse thrust (news report; paper not yet found).
+- Tests: test_block18_smooth_sitdown.py.
+
+### D24 (26 Oct 2026): drone-pad friction 0.5
+
+- PyBullet multiplies the two bodies' lateral friction values (measured: 0.5 x 0.5 -> about 0.25-0.30
+  deceleration / g). The sim used the defaults, so the effective drone-pad friction was 0.25. This
+  also explains the unexplained 8 m/s turn slip in the D19 carry test (about 4.2 m/s^2 > 2.5).
+- Now pad 1.0 x drone 0.5 = 0.5: rubber on dry concrete, sliding value (static 0.65) from a
+  friction table (ingdemurtas.it). Chosen as the cautious end of the sourced range.
+- Oracle sit-down (-5 m/s), push forces on, 200 holds: friction 0.25 / 0.5 / 0.65 / 1.0 ->
+  c = 0.5: 185 / 200 / 200 / 200; c = 1: 12 / 135 / 196 / 200. At 0.5 even the oracle holds 68% at
+  c = 1. Report this sensitivity in the paper.
+- Paper task unchanged (checked, c = 1, 1000 pinned episodes): A_s2_cont5 89.5% and P_base_s1
+  80.9%, identical outcome counts and impact v_z; strict success differs by 1-2 episodes.
+- Test added (effective friction 0.5); 247 pass.

@@ -28,6 +28,10 @@ Post-touchdown hold (--hold, SPEC D20): the episode continues after the first pa
   (landing_sim.HOLD_STEPS policy steps). success = safe landing (soft touchdown, stays on, settles);
   touchdown_rate = the paper's success (first contact on the pad top). Output folder suffix: _hold.
 
+Smooth pad (--pad-smooth, SPEC D23): pad speed changes spread over each 0.1 s step. Default: as the
+  run was trained (config.json "pad_smooth", else off). Folder suffix _smooth when on.
+  The hold sit-down limit (config.json "hold_vz_down", D23) is always taken from the run.
+
 Usage:
   python -m v5_shin.scripts.evaluate --run P_smoke_s1 --ckpt latest.pt --episodes 1000 --c 1.0
   python -m v5_shin.scripts.evaluate --run P_smoke_vz1_s1 --c 1.0 --motor sym_slow
@@ -62,7 +66,7 @@ def wilson(k, n, z=1.96):
 
 
 def _worker(args):
-    ckpt_path, cfg, seeds, c, stochastic, renderer, motor, inject, hold_steps = args
+    ckpt_path, cfg, seeds, c, stochastic, renderer, motor, inject, hold_steps, pad_smooth = args
     from v5_shin.envs.reward import ShinReward
     from v5_shin.envs.shin_env import ShinLandingEnv
     from v5_shin.policies.shin_policy import ShinPolicy
@@ -74,7 +78,8 @@ def _worker(args):
     pol.eval()
     env = ShinLandingEnv(mode=mode, renderer=renderer, egl=(renderer == "egl"), seed=0, c=c,
                          reward_fn=ShinReward(cfg.get("vz_penalty", "literal")),
-                         vz_max=cfg.get("vz_max", 3.0), motor_mode=motor, hold_steps=hold_steps)
+                         vz_max=cfg.get("vz_max", 3.0), motor_mode=motor, hold_steps=hold_steps,
+                         hold_vz_down=cfg.get("hold_vz_down"), pad_smooth=pad_smooth)
     keys = ("image", "u", "critic", "target", "s_rel") if mode == "vision" else ("u", "critic", "target", "s_rel")
     rows, frames = [], []
     try:
@@ -130,11 +135,13 @@ def _worker(args):
 
 
 def evaluate(run, ckpt, episodes=1000, c=1.0, seed_base=9000, workers=8, stochastic=False,
-             renderer="tiny", out=None, motor=None, inject_true_state=False, hold=False):
+             renderer="tiny", out=None, motor=None, inject_true_state=False, hold=False,
+             pad_smooth=None):
     from v5_shin.envs import landing_sim as LS
     hold_steps = LS.HOLD_STEPS if hold else 0
     run_dir = os.path.join(RUNS, run)
     cfg = json.load(open(os.path.join(run_dir, "config.json")))
+    pad_smooth = bool(cfg.get("pad_smooth", False)) if pad_smooth is None else bool(pad_smooth)
     trained_motor = cfg.get("motor", "asym")
     motor = motor or trained_motor
     if motor not in MOTOR_MODES:
@@ -144,7 +151,7 @@ def evaluate(run, ckpt, episodes=1000, c=1.0, seed_base=9000, workers=8, stochas
     seeds = [seed_base + i for i in range(episodes)]
     chunks = [seeds[i::workers] for i in range(workers) if seeds[i::workers]]
     args = [(os.path.join(run_dir, ckpt), cfg, ch, c, stochastic, renderer, motor, inject_true_state,
-             hold_steps) for ch in chunks]
+             hold_steps, pad_smooth) for ch in chunks]
     t0 = time.time()
     if len(args) == 1:
         res = [_worker(args[0])]
@@ -165,6 +172,7 @@ def evaluate(run, ckpt, episodes=1000, c=1.0, seed_base=9000, workers=8, stochas
                 policy="stochastic" if stochastic else "deterministic(mean)", renderer=renderer,
                 vz_max=cfg.get("vz_max", 3.0), mode=cfg["mode"], motor=motor,
                 trained_motor=trained_motor, inject_true_state=bool(inject_true_state),
+                pad_smooth=pad_smooth, hold_vz_down=cfg.get("hold_vz_down"),
                 success_rate=oc["success"] / n, success_ci95=wilson(oc["success"], n),
                 strict_success_rate=strict / n, strict_ci95=wilson(strict, n), outcomes=oc,
                 impact_vz_median=float(np.median(vz)), impact_vz_p10=float(np.percentile(vz, 10)),
@@ -209,6 +217,8 @@ def evaluate(run, ckpt, episodes=1000, c=1.0, seed_base=9000, workers=8, stochas
         tag += "_injtrue"
     if hold:
         tag += "_hold"
+    if pad_smooth:
+        tag += "_smooth"
     out = out or os.path.join(run_dir, tag)
     os.makedirs(out, exist_ok=True)
     with open(os.path.join(out, "episodes.csv"), "w", newline="") as f:
@@ -236,10 +246,13 @@ def main():
                     help="motor time constants (default: as trained, from config.json)")
     ap.add_argument("--hold", action="store_true",
                     help="D20: continue after touchdown; success = safe landing (hold)")
+    ap.add_argument("--pad-smooth", choices=["auto", "on", "off"], default="auto",
+                    help="D23 smooth pad speed changes (auto = as trained)")
     a = ap.parse_args()
     for c in a.c:
         s, _ = evaluate(a.run, a.ckpt, a.episodes, c, a.seed_base, a.workers, a.stochastic, a.renderer,
-                        motor=a.motor, inject_true_state=a.inject_true_state, hold=a.hold)
+                        motor=a.motor, inject_true_state=a.inject_true_state, hold=a.hold,
+                        pad_smooth={"auto": None, "on": True, "off": False}[a.pad_smooth])
         show = {k: s[k] for k in ("run", "ckpt", "timestep", "c", "episodes", "policy", "motor", "trained_motor", "inject_true_state",
                                   "success_rate", "success_ci95", "strict_success_rate", "outcomes",
                                   "impact_vz_median", "impact_vz_p10", "impact_vz_p90",

@@ -27,6 +27,16 @@ Hold practice (SPEC D22, training only): reset(on_pad=True) starts the episode a
 hold phase, the drone touching the pad top (random pad-frame offset within +-PRACTICE_XY,
 random heading), moving with the pad plus a soft PRACTICE_VZ descent, as at the moment of a soft
 touchdown (so it is in contact during the first step). info["practice"] marks these episodes.
+
+Smooth pad speed changes (SPEC D23, pad_smooth=True; default False = the paper's model): the
+random walk is unchanged (same draws, same clipping, same v and w at every 0.1 s mark), but each
+change is spread evenly over the next policy step's physics substeps instead of applied at once.
+Max acceleration at c = 1: 0.5 m/s per 0.1 s = 5 m/s^2.
+
+Drone-pad friction (SPEC D24): PyBullet multiplies the two bodies' lateral friction values; both
+were the default 0.5, so the effective value was 0.25. Now pad 1.0 x drone 0.5 = 0.5 (rubber on dry
+concrete, sliding value). Only contact is affected, so the paper task (ends at first contact) and
+flight are unchanged; it matters for the D20 hold.
 """
 import numpy as np
 import pybullet as p
@@ -57,6 +67,8 @@ HOLD_STILL_STEPS = 5            # last 0.5 s of the hold
 V_IMP = 1.0                     # m/s, max |impact v_z| relative to the pad
 V_STILL = 0.1                   # m/s, max |v_drone - v_pad_surface| when settled
 HOLD_TILT_MAX = np.radians(30.0)
+PAD_FRICTION = 1.0              # SPEC D24: lateral friction of the pad body
+DRONE_FRICTION = 0.5            # SPEC D24: of the drone; effective drone-pad = product = 0.5
 HOLD_OUTCOMES = ("hard_landing", "bounce", "slide_off", "tip_over", "not_still")
 PRACTICE_XY = 0.5               # m, |pad-frame offset| of the CoM for an on-pad start (D22)
 PRACTICE_GAP = 0.0              # m, gap between the drone's lowest point and the pad top
@@ -75,9 +87,10 @@ class LandingSim:
     off never changes the spawn / platform sequence of a pinned seed."""
 
     def __init__(self, renderer="tiny", egl=False, marker=True, gains_mode="random", seed=0,
-                 dr=None, motor_mode="asym", gui=False, hold_steps=0):
+                 dr=None, motor_mode="asym", gui=False, hold_steps=0, pad_smooth=False):
         self.dr = dr if dr is not None else DR.DRConfig()
         self.hold_steps = int(hold_steps)      # 0 = paper task (success at first top contact)
+        self.pad_smooth = bool(pad_smooth)     # D23: spread each pad speed change over a step
         self.motor_mode = motor_mode           # 'asym' always in training; others: diagnostic
         self._seed_streams(seed)
         self.cid = make_client(gui=gui, egl=egl)       # gui=True only for scripts/watch.py
@@ -86,6 +99,8 @@ class LandingSim:
         # Table II control gains: sampled once per env ("Env. init")
         self.gains = P.sample_gains(self.rng_gains, gains_mode)
         self.quad = LMF2Quad(self.cid, self.rng_gains, self.gains, motor_mode=motor_mode)
+        p.changeDynamics(self.plat.body, -1, lateralFriction=PAD_FRICTION, physicsClientId=self.cid)
+        p.changeDynamics(self.quad.body, -1, lateralFriction=DRONE_FRICTION, physicsClientId=self.cid)
         self.cam = Camera(self.cid, renderer=renderer)
         self.visual = DR.default_visual()
         self.t = 0
@@ -166,6 +181,7 @@ class LandingSim:
         self._vrel_hist = []
         self._td = None                        # touchdown_info at the touchdown substep
         self.practice = bool(on_pad)
+        self._pad_from = self._pad_to = (self.plat.v, self.plat.w)    # D23 ramp end points
         if on_pad:
             self._place_on_pad()
         self.spawn = sp
@@ -215,6 +231,7 @@ class LandingSim:
         for k in range(P.SUBSTEPS):
             # velocities just before this substep: the contact solver zeroes the
             # post-step velocity, so impact speed must be read pre-step
+            self._pad_ramp(k)                            # D23 (no-op unless pad_smooth)
             self._v_pre = self.quad.state()["v"]
             self._vplat_pre = self.plat.velocity()
             self.quad.apply_control(cmd)
@@ -233,8 +250,7 @@ class LandingSim:
                 outcome = None
                 self.phase = "hold"
         if outcome is None:
-            self.plat.perturb(self.rng)
-            self.plat._sync()                            # new speed to the solver (SPEC D19)
+            self._pad_perturb()
         terminated = outcome is not None
         truncated = (not terminated) and self.phase == "flight" and self.t >= HORIZON
         if truncated:
@@ -249,10 +265,36 @@ class LandingSim:
             info.update(self._terminal_info(outcome))
         return terminated, truncated, info
 
+    # ---- pad speed changes (D19 / D23) -----------------------------------------------
+    def _pad_perturb(self):
+        """Random-walk step of the pad (once per policy step). Without pad_smooth the new v, w
+        apply at once (paper); with it they are reached at the end of the next policy step."""
+        plat = self.plat
+        v0, w0 = plat.v, plat.w
+        plat.perturb(self.rng)
+        if self.pad_smooth:
+            self._pad_from, self._pad_to = (v0, w0), (plat.v, plat.w)
+            plat.v, plat.w = v0, w0
+        plat._sync()                                     # speed to the solver (SPEC D19)
+
+    def _pad_ramp(self, k):
+        """D23: pad v, w for physics substep k of this policy step (linear ramp)."""
+        if not self.pad_smooth:
+            return
+        f = (k + 1) / P.SUBSTEPS
+        (v0, w0), (v1, w1) = self._pad_from, self._pad_to
+        self.plat.v, self.plat.w = v0 + f * (v1 - v0), w0 + f * (w1 - w0)
+        self.plat._sync()
+
+    def pad_target(self):
+        """(v, w) the pad has at the end of the next policy step (the random-walk value)."""
+        return self._pad_to if self.pad_smooth else (self.plat.v, self.plat.w)
+
     # ---- post-touchdown hold (D20) --------------------------------------------------
     def _step_hold(self, cmd):
         outcome, sub, top_seen = None, P.SUBSTEPS, False
         for k in range(P.SUBSTEPS):
+            self._pad_ramp(k)
             self._v_pre = self.quad.state()["v"]
             self._vplat_pre = self.plat.velocity()
             self.quad.apply_control(cmd)
@@ -272,8 +314,7 @@ class LandingSim:
             if self.hold_t >= self.hold_steps:
                 outcome = hold_verdict(self._vrel_hist)
         if outcome is None:
-            self.plat.perturb(self.rng)
-            self.plat._sync()
+            self._pad_perturb()
         self.done = outcome is not None
         info = dict(outcome=outcome, substeps=sub, t=self.t, phase="hold",
                     touchdown=True, hold_t=self.hold_t, practice=self.practice)
