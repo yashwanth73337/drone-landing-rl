@@ -22,6 +22,11 @@ With hold_steps > 0 the first pad-top contact is a TOUCHDOWN, not the end:
   success          hold completed and |v_rel| <= V_STILL in each of the last HOLD_STILL_STEPS
   not_still        hold completed but that speed condition failed
   The 300-step horizon applies to flight only; a hold may run up to hold_steps past it.
+
+Hold practice (SPEC D22, training only): reset(on_pad=True) starts the episode already in the
+hold phase, the drone touching the pad top (random pad-frame offset within +-PRACTICE_XY,
+random heading), moving with the pad plus a soft PRACTICE_VZ descent, as at the moment of a soft
+touchdown (so it is in contact during the first step). info["practice"] marks these episodes.
 """
 import numpy as np
 import pybullet as p
@@ -53,6 +58,9 @@ V_IMP = 1.0                     # m/s, max |impact v_z| relative to the pad
 V_STILL = 0.1                   # m/s, max |v_drone - v_pad_surface| when settled
 HOLD_TILT_MAX = np.radians(30.0)
 HOLD_OUTCOMES = ("hard_landing", "bounce", "slide_off", "tip_over", "not_still")
+PRACTICE_XY = 0.5               # m, |pad-frame offset| of the CoM for an on-pad start (D22)
+PRACTICE_GAP = 0.0              # m, gap between the drone's lowest point and the pad top
+PRACTICE_VZ = 0.3               # m/s, descent relative to the pad at the start (< V_IMP)
 
 
 def hold_verdict(vrel_hist, n=HOLD_STILL_STEPS, v_still=V_STILL):
@@ -85,8 +93,9 @@ class LandingSim:
 
     def _seed_streams(self, seed):
         ss = np.random.SeedSequence(seed)
-        g = [np.random.default_rng(c) for c in ss.spawn(5)]
-        self.rng, self.rng_gains, self.rng_dr, self.rng_vis, self.rng_noise = g
+        g = [np.random.default_rng(c) for c in ss.spawn(6)]   # 6th added (D22): the first
+        self.rng, self.rng_gains, self.rng_dr, self.rng_vis, self.rng_noise = g[:5]   # 5 unchanged
+        self.rng_practice = g[5]
 
     def close(self):
         p.disconnect(self.cid)
@@ -126,8 +135,10 @@ class LandingSim:
                             dxyz0=np.array([dx, dy, dz]), tries=tries, uv0=uv[0])
         raise RuntimeError("spawn rejection sampling failed")
 
-    def reset(self, c=1.0, spawn=None):
-        """spawn: optional dict(pos, yaw, psi_plat[, roll, pitch, v]) for hand-built tests."""
+    def reset(self, c=1.0, spawn=None, on_pad=False):
+        """spawn: optional dict(pos, yaw, psi_plat[, roll, pitch, v]) for hand-built tests.
+        on_pad: hold-practice start (D22; needs hold_steps > 0)."""
+        assert not on_pad or self.hold_steps > 0, "on_pad needs the hold (hold_steps > 0)"
         sp = spawn if spawn is not None else self.sample_spawn(c)
         self.plat.reset(self.rng, c, xy=(0.0, 0.0), psi=sp["psi_plat"])
         # Table II initial state (episode start); a hand-built spawn's "v" overrides
@@ -154,8 +165,42 @@ class LandingSim:
         self.hold_t = 0
         self._vrel_hist = []
         self._td = None                        # touchdown_info at the touchdown substep
+        self.practice = bool(on_pad)
+        if on_pad:
+            self._place_on_pad()
         self.spawn = sp
         return dict(spawn=sp, v0=v0, w0=w0, visual=dict(self.visual))
+
+    def _rest_offset(self):
+        """CoM height above the drone's lowest point (level attitude), from the collision
+        geometry; computed once."""
+        if getattr(self, "_rest_off", None) is None:
+            body, cid = self.quad.body, self.cid
+            pos, q = p.getBasePositionAndOrientation(body, physicsClientId=cid)
+            p.resetBasePositionAndOrientation(body, pos, [0, 0, 0, 1], physicsClientId=cid)
+            zmin = min(p.getAABB(body, l, physicsClientId=cid)[0][2]
+                       for l in range(-1, p.getNumJoints(body, physicsClientId=cid)))
+            self._rest_off = pos[2] - zmin
+            p.resetBasePositionAndOrientation(body, pos, q, physicsClientId=cid)
+        return self._rest_off
+
+    def _place_on_pad(self):
+        """D22: drone touching the pad top, moving with the pad surface and descending at
+        PRACTICE_VZ relative to it (a soft touchdown), hold phase."""
+        rng, plat = self.rng_practice, self.plat
+        ox, oy = rng.uniform(-PRACTICE_XY, PRACTICE_XY, 2)
+        c, sn = np.cos(plat.psi), np.sin(plat.psi)
+        pc = plat.pad_center()
+        pos = np.array([pc[0] + c * ox - sn * oy, pc[1] + sn * ox + c * oy,
+                        PAD_TOP_Z + self._rest_offset() + PRACTICE_GAP])
+        r = pos - pc
+        v = plat.velocity() + np.array([-plat.w * r[1], plat.w * r[0], -PRACTICE_VZ])
+        self.quad.reset_pose(pos, yaw=float(rng.uniform(-np.pi, np.pi)), v=v,
+                             w_body=np.zeros(3))
+        p.performCollisionDetection(physicsClientId=self.cid)
+        self._v_pre, self._vplat_pre = v.copy(), plat.velocity()
+        self._td = self.touchdown_info("success")      # rel_vel = (0, 0, -PRACTICE_VZ)
+        self.phase = "hold"
 
     # ---- step -----------------------------------------------------------------
     def step(self, cmd):
@@ -199,7 +244,7 @@ class LandingSim:
             return terminated, truncated, dict(outcome=outcome, substeps=sub, t=self.t,
                                                **self.touchdown_info(outcome))
         info = dict(outcome=outcome, substeps=sub, t=self.t, phase=self.phase,
-                    touchdown=self._td is not None, hold_t=self.hold_t)
+                    touchdown=self._td is not None, hold_t=self.hold_t, practice=self.practice)
         if self.done:
             info.update(self._terminal_info(outcome))
         return terminated, truncated, info
@@ -231,7 +276,7 @@ class LandingSim:
             self.plat._sync()
         self.done = outcome is not None
         info = dict(outcome=outcome, substeps=sub, t=self.t, phase="hold",
-                    touchdown=True, hold_t=self.hold_t)
+                    touchdown=True, hold_t=self.hold_t, practice=self.practice)
         if self.done:
             info.update(self._terminal_info(outcome))
         return self.done, False, info

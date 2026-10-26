@@ -51,8 +51,10 @@ class ShinLandingEnv(gym.Env):
 
     def __init__(self, mode="vision", c=1.0, seed=0, renderer="egl", egl=None, dr=None,
                  reward_fn="paper", gains_mode="random", vz_max=VZ_MAX_DEFAULT,
-                 motor_mode="asym", gui=False, hold_steps=0):
+                 motor_mode="asym", gui=False, hold_steps=0, hold_practice=0.0):
         assert mode in ACTOR_KEYS, mode
+        assert 0.0 <= hold_practice <= 1.0 and (hold_practice == 0.0 or hold_steps > 0)
+        self.hold_practice = float(hold_practice)      # D22: share of on-pad starts (training)
         self.mode = mode
         self.c = float(c)
         if reward_fn == "paper":
@@ -89,7 +91,10 @@ class ShinLandingEnv(gym.Env):
             self.sim._seed_streams(seed)           # gains stay as sampled at env init
         c = (options or {}).get("c", self.c)
         self.c_episode = float(c)                  # tags this episode for the curriculum
-        info = self.sim.reset(c=c, spawn=(options or {}).get("spawn"))
+        practice = bool((options or {}).get("on_pad", False)) or (
+            self.hold_practice > 0 and self.sim.rng_practice.random() < self.hold_practice)
+        info = self.sim.reset(c=c, spawn=(options or {}).get("spawn"), on_pad=practice)
+        info["practice"] = practice
         if hasattr(self.reward_fn, "reset"):
             self.reward_fn.reset(self)
         obs, extra = self._obs()

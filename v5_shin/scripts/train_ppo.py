@@ -5,8 +5,11 @@ Usage (from the repo root). DO NOT start a run without the supervisor/owner's go
   python -m v5_shin.scripts.train_ppo --mode vision --name A_s1 --seed 1 --total-steps 20000000
   --motor {asym,sym_slow,sym_fast}: motor time constants (default asym = AerialGym LMF2, the
   paper's setting). sym_* are DIAGNOSTIC ablations of the actuator sink (SPEC §15, 1 Oct).
-  --reward {paper,v1,v2,v3}: paper = Table III (default). v1/v2/v3 = touchdown-aware reward
-  (SPEC D21) and they switch on the post-touchdown hold (SPEC D20); success = safe landing.
+  --reward {paper,v1,v2,v3,v4}: paper = Table III (default). v1-v4 = touchdown-aware reward
+  (SPEC D21, D22) and they switch on the post-touchdown hold (SPEC D20); success = safe landing.
+  --hold-practice P (D22, needs v1-v4): share of training episodes that start resting on the pad
+  in the hold phase. These are logged (episodes.csv column 'practice', updates.csv n_practice*)
+  but never counted for the curriculum or the success / outcome columns. Default 0 = off.
 
 Outputs in v5_shin/runs/<name>/:
   config.json            every argument + versions (tracked)
@@ -38,21 +41,22 @@ RUNS = os.path.join(os.path.dirname(__file__), "..", "runs")
 
 
 def make_env_fn(mode, seed, renderer, vz_penalty, c, dr_off=False, vz_max=VZ_MAX_DEFAULT,
-                motor_mode="asym", reward="paper"):
+                motor_mode="asym", reward="paper", hold_practice=0.0):
     hold = reward != "paper"                     # D20 hold goes with the D21 reward
     def f():
         rf = TouchdownReward(reward, vz_penalty) if hold else ShinReward(vz_penalty)
         return ShinLandingEnv(mode=mode, renderer=renderer, egl=(renderer == "egl"), seed=seed, c=c,
                               reward_fn=rf, vz_max=vz_max,
                               dr=DRConfig.off() if dr_off else DRConfig(), motor_mode=motor_mode,
-                              hold_steps=(LS.HOLD_STEPS if hold else 0))
+                              hold_steps=(LS.HOLD_STEPS if hold else 0),
+                              hold_practice=(hold_practice if hold else 0.0))
     return f
 
 
 def make_venv(mode, n_envs, seed, renderer, vz_penalty, c, sync=False, dr_off=False,
-              vz_max=VZ_MAX_DEFAULT, motor_mode="asym", reward="paper"):
+              vz_max=VZ_MAX_DEFAULT, motor_mode="asym", reward="paper", hold_practice=0.0):
     fns = [make_env_fn(mode, seed * 1000 + i, renderer, vz_penalty, c, dr_off, vz_max, motor_mode,
-                       reward)
+                       reward, hold_practice)
            for i in range(n_envs)]
     kw = dict(autoreset_mode=gym.vector.AutoresetMode.SAME_STEP)
     if sync:
@@ -82,8 +86,9 @@ def episode_row(e, update, level, hold=False):
                impact_vz=(float(rv[2]) if rv is not None else None),
                impact_speed=(float(np.linalg.norm(rv)) if rv is not None else None),
                tilt_deg=e.get("tilt_deg"))
-    if hold:                                     # extra column only for D20 runs
+    if hold:                                     # extra columns only for D20 runs
         row["touchdown"] = bool(e.get("touchdown"))
+        row["practice"] = bool(e.get("practice"))
     return row
 
 
@@ -110,8 +115,10 @@ def main():
                     help="vertical-speed action limit (m/s); D16 default 1.0 (P_smoke_s1 used 3.0)")
     ap.add_argument("--motor", choices=["asym", "sym_slow", "sym_fast"], default="asym",
                     help="motor time constants; asym = AerialGym LMF2 (default); sym_* = diagnostic")
-    ap.add_argument("--reward", choices=["paper", "v1", "v2", "v3"], default="paper",
-                    help="paper = Table III; v1/v2/v3 = touchdown-aware (D21) with the hold (D20)")
+    ap.add_argument("--reward", choices=["paper", "v1", "v2", "v3", "v4"], default="paper",
+                    help="paper = Table III; v1-v4 = touchdown-aware (D21, D22) with the hold (D20)")
+    ap.add_argument("--hold-practice", type=float, default=0.0,
+                    help="D22: share of training episodes starting on the pad (needs v1-v4)")
     ap.add_argument("--renderer", choices=["egl", "tiny"], default="egl")
     ap.add_argument("--start-level", type=int, default=10)
     ap.add_argument("--ckpt-every", type=int, default=50, help="updates")
@@ -119,6 +126,8 @@ def main():
     ap.add_argument("--resume", action="store_true", help="continue from runs/<name>/latest.pt")
     a = ap.parse_args()
     hold = a.reward != "paper"
+    if not 0.0 <= a.hold_practice <= 1.0 or (a.hold_practice > 0 and not hold):
+        ap.error("--hold-practice must be in [0, 1] and needs --reward v1|v2|v3|v4")
 
     run = os.path.join(RUNS, a.name)
     os.makedirs(run, exist_ok=True)
@@ -132,7 +141,7 @@ def main():
                     lambda_est=(a.lambda_est if a.mode == "vision" else 0.0))
     cur = Curriculum(start_level=a.start_level)
     venv = make_venv(a.mode, a.n_envs, a.seed, a.renderer, a.vz_penalty, cur.c, vz_max=a.vz_max,
-                     motor_mode=a.motor, reward=a.reward)
+                     motor_mode=a.motor, reward=a.reward, hold_practice=a.hold_practice)
     use_ra = a.r_active == "auto" and a.mode == "vision" and cfg.lambda_est > 0
     tr = PPOTrainer(venv, cfg, device=a.device, total_updates=total_updates,
                     r_active_fn=ActivePerceptionReward() if use_ra else None)
@@ -157,13 +166,17 @@ def main():
     try:
         while tr.update < total_updates:
             t_roll = time.time()
-            buf, eps = tr.collect()
+            buf, eps_all = tr.collect()
             t_roll = time.time() - t_roll
             level_before = cur.level
-            for e in eps:
+            for e in eps_all:
                 ep_log.write(episode_row(e, tr.update, cur.level, hold))
+                if e.get("practice"):                # D22: never counted for the curriculum
+                    continue
                 if cur.record(e["outcome"] == "success", e["c_episode"]):
                     venv.call("set_c", cur.c)
+            prac = [e for e in eps_all if e.get("practice")]
+            eps = [e for e in eps_all if not e.get("practice")]
             for h in cur.history[n_hist:]:
                 cur_log.write(h)
             n_hist = len(cur.history)
@@ -177,7 +190,9 @@ def main():
                 td = [e for e in eps if e.get("touchdown")]
                 hold_cols = {f"n_{k}": outc.count(k) for k in LS.HOLD_OUTCOMES}
                 hold_cols.update(n_touchdown=len(td), td_impact_vz_mean=(
-                    float(np.mean([e["rel_vel"][2] for e in td])) if td else None))
+                    float(np.mean([e["rel_vel"][2] for e in td])) if td else None),
+                    n_practice=len(prac),
+                    n_practice_success=sum(e["outcome"] == "success" for e in prac))
             row = dict(update=tr.update, global_step=tr.global_step, wall_s=round(time.time() - t0, 1),
                        sps=round(per_update / max(t_roll + t_learn, 1e-9), 1),
                        rollout_s=round(t_roll, 2), learn_s=round(t_learn, 2),
@@ -206,6 +221,8 @@ def main():
                   + (f" | td {row['n_touchdown']:3d} hard {row['n_hard_landing']:3d} "
                      f"hfail {sum(row['n_' + k] for k in ('bounce', 'slide_off', 'tip_over', 'not_still')):3d}"
                      if hold else "")
+                  + (f" | pr {row['n_practice_success']:3d}/{row['n_practice']:3d}"
+                     if a.hold_practice > 0 else "")
                   + f" | {row['sps']:.0f} sps", flush=True)
             extra = dict(curriculum=cur.state_dict())
             if tr.update % a.ckpt_every == 0 or tr.update == total_updates:

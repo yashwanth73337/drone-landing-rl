@@ -1325,3 +1325,31 @@ Caveats: one seed per comparison; four learning-rate restarts on seed 1; no pair
 - Screening plan: fine-tune P_base_s1 at L80 for ~1M steps with v1, v2, v3 (seed 1 each).
   DEVIATION: learning rate restarts at 1.0e-4 and decays to 0 (same pattern as earlier
   continuations).
+
+### D22 (26 Oct 2026): v1-v3 screening result, noise finding, hold practice and reward v4
+
+- Screening (P, seed 1, fine-tuned from P_base_s1 at L80, +1M steps each; c = 1, 1000
+  pinned episodes, deterministic): touchdown (paper metric) / soft touchdowns / median impact:
+  base 80.9% / 12 / -2.18; v1 76.5% / 1 / -2.37; v2 92.9% / 843 / -0.66; v3 87.8% / 106 / -1.72.
+  Safe landing 0.0% for all. Graded (v2) works, flat (v1) does not.
+- v2 hold failures (843 soft touchdowns): slide_off 433 (235 at the first hold step; CoM over the
+  pad at touchdown in about half), tip_over 157, bounce 114, not_still 138 (median max |v_rel|
+  0.65 m/s, so the 0.1 m/s limit is not the cause).
+- Noise finding: P_td_v2_s1 with sampled actions (--stochastic): 898 hard landings, 31 soft,
+  median impact -2.02 m/s (deterministic: 86 / 843 / -0.66). log_std -1.18 (about +-0.31 m/s
+  on the vz command). During training the hold was reached only 1-6 times per update. Consistent
+  with the asymmetric-motor sink under jittery commands (not isolated).
+- v2 flaw: a soft touchdown that fails the hold (-10) ranked below a slightly hard landing (-1).
+- Hold practice (--hold-practice P, training only): share P of episodes start in the hold phase,
+  touching the pad top (gap 0, CoM offset within +-0.5 m in the pad frame, random heading),
+  moving with the pad plus a 0.3 m/s soft descent (a first attempt with a 2 mm gap and zero
+  vertical speed lost contact in the first step on the real drone). Practice episodes are logged
+  but not counted for the curriculum or the success columns. New RNG stream (6th); the first five
+  are unchanged (tested).
+- Reward v4 = v2 flight terms + graded hold: soft touchdown +2 max(0, 1 - e / 0.75) (e = max |x|,|y|
+  of the CoM in the pad frame); each hold step +0.5 (1 - min(1, |v_rel|)); hold failure -5;
+  hard landing -min(10, 5 + 5 (|v_z| - 1)) (always worse than a failed hold); success +10;
+  crash -10.
+- Tests: test_block17_hold_practice.py (27); 238 pass.
+- Planned run: P_td_v4p_s1 = v4 + practice 0.25, from P_base_s1, +2M steps. DEVIATION: learning
+  rate restarts at 1.5e-4 and decays to 0.
