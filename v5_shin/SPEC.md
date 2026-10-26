@@ -1406,3 +1406,18 @@ Caveats: one seed per comparison; four learning-rate restarts on seed 1; no pair
 - Tests: test_block19_lowpass (4), test_block20_noise_cap (3), test_block21_reward_v5 (8); 262 pass.
 - Planned: P_td_v5_s1 (v5) and P_td_v5cap_s1 (v5 + log-std cap -2.5, about +-0.8 m/s lateral),
   both + practice 0.25 + sit-down 5, +2M steps from P_base_s1. DEVIATION: LR restart at 1.5e-4.
+
+### D28 (26 Oct 2026): v5 results; LR restart option
+
+- Clean (deterministic) hold-task evaluation, c = 0.5 / c = 1, 1000 pinned episodes, P seed 1:
+  safe landing base 0 / 0%; v4s 20.2 / 2.7%; v5 (P_td_v5_s1) 85.4 / 12.2%; v5 + log-std cap -2.5
+  (P_td_v5cap_s1) 69.1 / 6.7%. v5 at c = 1: 868 soft touchdowns, median impact -0.72 m/s, 624
+  not_still; touchdown (paper metric) 99.8%. Stochastic: v5 1.2 / 0.3%, v5cap 36.1 / 3.4% (more
+  robust). Training logs (stochastic) understated the clean result: judge by clean evaluation.
+- Hold from an on-pad start (diag_hold): v5 160/200 (c 0.5), 26/200 (c 1); v5cap 140, 9.
+  Oracle ceiling at friction 0.5: 200, 135. At c = 1 the hold now limits.
+- Decision: v5 (no cap) is the main method; v5cap is a robustness variant.
+- D28 --lr-restart (with --resume): LR starts at --lr at the resumed update and decays to 0 at
+  --total-steps. Needed for vision: A_s2_cont5 is at update 6348, so +2M steps without it would
+  start at 2.1e-5 instead of 1.5e-4. Recorded in config.json (ppo.lr_schedule_start). DEVIATION as before.
+- Tests: test_block22_lr_restart.py (3); 265 pass.

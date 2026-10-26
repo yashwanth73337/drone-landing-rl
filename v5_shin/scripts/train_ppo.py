@@ -16,6 +16,8 @@ Usage (from the repo root). DO NOT start a run without the supervisor/owner's go
   --action-lowpass ALPHA (D25): low-pass filter on the vertical action (0 < ALPHA <= 1). Default off.
   --log-std-max-xy L (D26): cap on the vx, vy exploration log-std (applied at start, after loading a
   checkpoint and after every optimizer step). Default off.
+  --lr-restart (D28, with --resume): the linear LR schedule starts at --lr at the resumed update and
+  falls to 0 at --total-steps (default: one schedule over the whole run history, as before).
 
 Outputs in v5_shin/runs/<name>/:
   config.json            every argument + versions (tracked)
@@ -116,6 +118,8 @@ def main():
     ap.add_argument("--micro-chunks", type=int, default=None,
                     help="chunks per micro-batch (grad accumulation); vision on 4 GB: 8")
     ap.add_argument("--lr", type=float, default=3e-4)
+    ap.add_argument("--lr-restart", action="store_true",
+                    help="D28: with --resume, LR decays from --lr to 0 over this run only")
     ap.add_argument("--log-std-max-xy", type=float, default=None,
                     help="D26: cap on the vx, vy exploration log-std (default off)")
     ap.add_argument("--lambda-est", type=float, default=1.0, help="0 = w/o state estimation")
@@ -174,6 +178,8 @@ def main():
         d = torch.load(os.path.join(run, "latest.pt"), map_location=a.device, weights_only=False)
         extra = tr.load_state_dict(d)
         tr.clamp_log_std()                       # D26 (no-op unless --log-std-max-xy)
+        if a.lr_restart:                         # D28
+            tr.cfg.lr_schedule_start = tr.update
         cur = Curriculum.from_state_dict(extra["curriculum"])
         venv.call("set_c", cur.c)
     if not a.resume or not os.path.exists(os.path.join(run, "config.json")):
