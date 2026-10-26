@@ -36,6 +36,10 @@ TouchdownReward (SPEC D21, agreed 25 Oct 2026; needs the D20 hold, hold_steps > 
     hard_landing      -min(10, 5 + 5 (|impact v_z| - 1))      (always worse than a failed hold)
     bounce / slide_off / tip_over / not_still   -5
     hold success +10; crash / tilt / drift -10 (as before)
+
+  v5 (SPEC D27): v4 with a gentler hard-landing slope so the penalty keeps a gradient up to 3 m/s
+    (v4 reached its -10 floor at 2 m/s, where most noisy training landings are):
+    hard_landing      -min(10, 5 + 2.5 (|impact v_z| - 1))
 """
 import numpy as np
 
@@ -106,7 +110,9 @@ FLARE_K = 1.0           # 1/s, + 1 m/s of allowed descent per metre of height
 FLARE_D = 1.5           # m, horizontal distance within which the flare term applies
 W_FLARE = 1.0
 HARD_K = 5.0            # v2: penalty per m/s of impact speed above V_IMP
-VARIANTS = ("v1", "v2", "v3", "v4")
+VARIANTS = ("v1", "v2", "v3", "v4", "v5")
+HOLD_GRADED = ("v4", "v5")    # variants with the graded hold terms (D22)
+HARD_K_V5 = 2.5               # v5: penalty per m/s above V_IMP (floor -10 reached at 3 m/s)
 # v4 (D22)
 CENTRE_BONUS = 2.0      # at the pad centre, falling linearly to 0 at the pad edge
 HOLD_STEP_GAIN = 0.5    # per hold step when still
@@ -127,6 +133,8 @@ def hard_landing_reward(variant, impact_vz):
         return -min(10.0, HARD_K * (abs(float(impact_vz)) - V_IMP))
     if variant == "v4":
         return -min(10.0, -R_HOLD_FAIL_V4 + HARD_K * (abs(float(impact_vz)) - V_IMP))
+    if variant == "v5":
+        return -min(10.0, -R_HOLD_FAIL_V4 + HARD_K_V5 * (abs(float(impact_vz)) - V_IMP))
     return R_CRASH
 
 
@@ -137,7 +145,7 @@ def centre_bonus(rel_pos_pad):
 
 
 def hold_step_reward(variant, vrel):
-    if variant == "v4":
+    if variant in HOLD_GRADED:
         return HOLD_STEP_GAIN * (1.0 - min(1.0, vrel))
     return -min(1.0, vrel)
 
@@ -161,7 +169,7 @@ class TouchdownReward(ShinReward):
         outcome = info.get("outcome")
         if outcome is None and info.get("phase") == "hold":
             if info.get("hold_t", 0) == 0:                     # the touchdown step
-                r = centre_bonus(env.sim._td["rel_pos_pad"]) if self.variant == "v4" else 0.0
+                r = centre_bonus(env.sim._td["rel_pos_pad"]) if self.variant in HOLD_GRADED else 0.0
             else:
                 r = hold_step_reward(self.variant, env.sim.hold_vrel())
             info["reward_terms"] = dict(hold=r)
@@ -171,7 +179,7 @@ class TouchdownReward(ShinReward):
             return R_SUCCESS
         if outcome == "hard_landing":
             return hard_landing_reward(self.variant, info["rel_vel"][2])
-        if outcome in HOLD_FAIL_OUTCOMES and self.variant == "v4":
+        if outcome in HOLD_FAIL_OUTCOMES and self.variant in HOLD_GRADED:
             return R_HOLD_FAIL_V4
         if outcome in CRASH_OUTCOMES or outcome in HOLD_FAIL_OUTCOMES:
             return R_CRASH

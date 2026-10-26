@@ -18,6 +18,9 @@ Hold sit-down (SPEC D23, hold_vz_down=None = off): while the sim is in the hold 
         vertical action is scaled by hold_vz_down (m/s) instead of vz_max, so the controller can
         cut thrust and the drone's weight goes onto the pad (more friction). Flight is unchanged.
 Smooth pad (SPEC D23, pad_smooth=False = off): see LandingSim.
+Vertical command low-pass (SPEC D25, action_lowpass=None = off): the vertical action is filtered
+        vz_f <- vz_f + alpha (a_vz - vz_f) each policy step (first step: vz_f = a_vz; reset per episode),
+        so step-to-step jitter partly cancels (asymmetric-motor sink). Lateral and yaw unchanged.
 
 Reward: reward_fn="paper" (default) -> envs.reward.ShinReward() (Table III, D3, D4);
         a callable with reset(env) and __call__(env, info); or None -> 0.0 (tests only).
@@ -57,7 +60,7 @@ class ShinLandingEnv(gym.Env):
     def __init__(self, mode="vision", c=1.0, seed=0, renderer="egl", egl=None, dr=None,
                  reward_fn="paper", gains_mode="random", vz_max=VZ_MAX_DEFAULT,
                  motor_mode="asym", gui=False, hold_steps=0, hold_practice=0.0,
-                 hold_vz_down=None, pad_smooth=False):
+                 hold_vz_down=None, pad_smooth=False, action_lowpass=None):
         assert mode in ACTOR_KEYS, mode
         assert 0.0 <= hold_practice <= 1.0 and (hold_practice == 0.0 or hold_steps > 0)
         self.hold_practice = float(hold_practice)      # D22: share of on-pad starts (training)
@@ -78,6 +81,9 @@ class ShinLandingEnv(gym.Env):
                               hold_steps=hold_steps)           # D20: 0 = paper task (no hold)
         self.action_scale = action_scale(vz_max)
         self.sim.pad_smooth = bool(pad_smooth)         # D23
+        assert action_lowpass is None or 0.0 < action_lowpass <= 1.0
+        self.action_lowpass = action_lowpass           # D25: alpha of the vz filter (None = off)
+        self._vz_f = None
         f32 = np.float32
         self.observation_space = spaces.Dict({
             "image": spaces.Box(0, 255, (OBS_H, OBS_W), np.uint8),
@@ -104,6 +110,7 @@ class ShinLandingEnv(gym.Env):
             self.hold_practice > 0 and self.sim.rng_practice.random() < self.hold_practice)
         info = self.sim.reset(c=c, spawn=(options or {}).get("spawn"), on_pad=practice)
         info["practice"] = practice
+        self._vz_f = None                              # D25 filter state
         if hasattr(self.reward_fn, "reset"):
             self.reward_fn.reset(self)
         obs, extra = self._obs()
@@ -111,6 +118,10 @@ class ShinLandingEnv(gym.Env):
 
     def step(self, action):
         a = np.clip(np.asarray(action, dtype=np.float64), -1.0, 1.0)
+        if self.action_lowpass is not None:            # D25
+            self._vz_f = a[2] if self._vz_f is None else self._vz_f + self.action_lowpass * (a[2] - self._vz_f)
+            a = a.copy()
+            a[2] = self._vz_f
         cmd = a * self.current_action_scale(a)
         terminated, truncated, info = self.sim.step(cmd)
         obs, extra = self._obs()

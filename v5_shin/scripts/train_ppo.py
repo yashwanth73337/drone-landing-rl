@@ -5,14 +5,17 @@ Usage (from the repo root). DO NOT start a run without the supervisor/owner's go
   python -m v5_shin.scripts.train_ppo --mode vision --name A_s1 --seed 1 --total-steps 20000000
   --motor {asym,sym_slow,sym_fast}: motor time constants (default asym = AerialGym LMF2, the
   paper's setting). sym_* are DIAGNOSTIC ablations of the actuator sink (SPEC §15, 1 Oct).
-  --reward {paper,v1,v2,v3,v4}: paper = Table III (default). v1-v4 = touchdown-aware reward
-  (SPEC D21, D22) and they switch on the post-touchdown hold (SPEC D20); success = safe landing.
+  --reward {paper,v1,v2,v3,v4,v5}: paper = Table III (default). v1-v5 = touchdown-aware reward
+  (SPEC D21, D22, D27) and they switch on the post-touchdown hold (SPEC D20); success = safe landing.
   --hold-practice P (D22, needs v1-v4): share of training episodes that start resting on the pad
   in the hold phase. These are logged (episodes.csv column 'practice', updates.csv n_practice*)
   but never counted for the curriculum or the success / outcome columns. Default 0 = off.
   --hold-vz-down V (D23, needs v1-v4): in the hold, a negative vertical action is scaled to V m/s
   (instead of --vz-max), so the drone can cut thrust and sit on the pad. Default: off.
   --pad-smooth (D23): pad speed changes spread over each 0.1 s step (same random walk). Default off.
+  --action-lowpass ALPHA (D25): low-pass filter on the vertical action (0 < ALPHA <= 1). Default off.
+  --log-std-max-xy L (D26): cap on the vx, vy exploration log-std (applied at start, after loading a
+  checkpoint and after every optimizer step). Default off.
 
 Outputs in v5_shin/runs/<name>/:
   config.json            every argument + versions (tracked)
@@ -45,7 +48,7 @@ RUNS = os.path.join(os.path.dirname(__file__), "..", "runs")
 
 def make_env_fn(mode, seed, renderer, vz_penalty, c, dr_off=False, vz_max=VZ_MAX_DEFAULT,
                 motor_mode="asym", reward="paper", hold_practice=0.0, hold_vz_down=None,
-                pad_smooth=False):
+                pad_smooth=False, action_lowpass=None):
     hold = reward != "paper"                     # D20 hold goes with the D21 reward
     def f():
         rf = TouchdownReward(reward, vz_penalty) if hold else ShinReward(vz_penalty)
@@ -55,15 +58,15 @@ def make_env_fn(mode, seed, renderer, vz_penalty, c, dr_off=False, vz_max=VZ_MAX
                               hold_steps=(LS.HOLD_STEPS if hold else 0),
                               hold_practice=(hold_practice if hold else 0.0),
                               hold_vz_down=(hold_vz_down if hold else None),
-                              pad_smooth=pad_smooth)
+                              pad_smooth=pad_smooth, action_lowpass=action_lowpass)
     return f
 
 
 def make_venv(mode, n_envs, seed, renderer, vz_penalty, c, sync=False, dr_off=False,
               vz_max=VZ_MAX_DEFAULT, motor_mode="asym", reward="paper", hold_practice=0.0,
-              hold_vz_down=None, pad_smooth=False):
+              hold_vz_down=None, pad_smooth=False, action_lowpass=None):
     fns = [make_env_fn(mode, seed * 1000 + i, renderer, vz_penalty, c, dr_off, vz_max, motor_mode,
-                       reward, hold_practice, hold_vz_down, pad_smooth)
+                       reward, hold_practice, hold_vz_down, pad_smooth, action_lowpass)
            for i in range(n_envs)]
     kw = dict(autoreset_mode=gym.vector.AutoresetMode.SAME_STEP)
     if sync:
@@ -113,6 +116,8 @@ def main():
     ap.add_argument("--micro-chunks", type=int, default=None,
                     help="chunks per micro-batch (grad accumulation); vision on 4 GB: 8")
     ap.add_argument("--lr", type=float, default=3e-4)
+    ap.add_argument("--log-std-max-xy", type=float, default=None,
+                    help="D26: cap on the vx, vy exploration log-std (default off)")
     ap.add_argument("--lambda-est", type=float, default=1.0, help="0 = w/o state estimation")
     ap.add_argument("--vz-penalty", choices=["literal", "prose"], default="literal")
     ap.add_argument("--r-active", choices=["auto", "off"], default="auto",
@@ -122,7 +127,7 @@ def main():
                     help="vertical-speed action limit (m/s); D16 default 1.0 (P_smoke_s1 used 3.0)")
     ap.add_argument("--motor", choices=["asym", "sym_slow", "sym_fast"], default="asym",
                     help="motor time constants; asym = AerialGym LMF2 (default); sym_* = diagnostic")
-    ap.add_argument("--reward", choices=["paper", "v1", "v2", "v3", "v4"], default="paper",
+    ap.add_argument("--reward", choices=["paper", "v1", "v2", "v3", "v4", "v5"], default="paper",
                     help="paper = Table III; v1-v4 = touchdown-aware (D21, D22) with the hold (D20)")
     ap.add_argument("--hold-practice", type=float, default=0.0,
                     help="D22: share of training episodes starting on the pad (needs v1-v4)")
@@ -130,6 +135,8 @@ def main():
                     help="D23: downward vertical limit (m/s) in the hold (needs v1-v4)")
     ap.add_argument("--pad-smooth", action="store_true",
                     help="D23: spread pad speed changes over each 0.1 s step")
+    ap.add_argument("--action-lowpass", type=float, default=None,
+                    help="D25: vertical action low-pass alpha in (0, 1] (default off)")
     ap.add_argument("--renderer", choices=["egl", "tiny"], default="egl")
     ap.add_argument("--start-level", type=int, default=10)
     ap.add_argument("--ckpt-every", type=int, default=50, help="updates")
@@ -138,9 +145,11 @@ def main():
     a = ap.parse_args()
     hold = a.reward != "paper"
     if not 0.0 <= a.hold_practice <= 1.0 or (a.hold_practice > 0 and not hold):
-        ap.error("--hold-practice must be in [0, 1] and needs --reward v1|v2|v3|v4")
+        ap.error("--hold-practice must be in [0, 1] and needs --reward v1-v5")
     if a.hold_vz_down is not None and (not hold or a.hold_vz_down < a.vz_max):
-        ap.error("--hold-vz-down needs --reward v1|v2|v3|v4 and must be >= --vz-max")
+        ap.error("--hold-vz-down needs --reward v1-v5 and must be >= --vz-max")
+    if a.action_lowpass is not None and not 0.0 < a.action_lowpass <= 1.0:
+        ap.error("--action-lowpass must be in (0, 1]")
 
     run = os.path.join(RUNS, a.name)
     os.makedirs(run, exist_ok=True)
@@ -151,17 +160,20 @@ def main():
     micro = a.micro_chunks if a.micro_chunks else (8 if (a.mode == "vision" and a.device != "cpu") else None)
     cfg = PPOConfig(mode=a.mode, n_steps=a.n_steps, seq_len=a.seq_len, epochs=a.epochs,
                     minibatches=a.minibatches, micro_chunks=micro, lr=a.lr,
-                    lambda_est=(a.lambda_est if a.mode == "vision" else 0.0))
+                    lambda_est=(a.lambda_est if a.mode == "vision" else 0.0),
+                    log_std_max_xy=a.log_std_max_xy)
     cur = Curriculum(start_level=a.start_level)
     venv = make_venv(a.mode, a.n_envs, a.seed, a.renderer, a.vz_penalty, cur.c, vz_max=a.vz_max,
                      motor_mode=a.motor, reward=a.reward, hold_practice=a.hold_practice,
-                     hold_vz_down=a.hold_vz_down, pad_smooth=a.pad_smooth)
+                     hold_vz_down=a.hold_vz_down, pad_smooth=a.pad_smooth,
+                     action_lowpass=a.action_lowpass)
     use_ra = a.r_active == "auto" and a.mode == "vision" and cfg.lambda_est > 0
     tr = PPOTrainer(venv, cfg, device=a.device, total_updates=total_updates,
                     r_active_fn=ActivePerceptionReward() if use_ra else None)
     if a.resume:
         d = torch.load(os.path.join(run, "latest.pt"), map_location=a.device, weights_only=False)
         extra = tr.load_state_dict(d)
+        tr.clamp_log_std()                       # D26 (no-op unless --log-std-max-xy)
         cur = Curriculum.from_state_dict(extra["curriculum"])
         venv.call("set_c", cur.c)
     if not a.resume or not os.path.exists(os.path.join(run, "config.json")):

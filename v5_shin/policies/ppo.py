@@ -61,6 +61,7 @@ class PPOConfig:
         self.lambda_est = 1.0             # D10; 0 = the "w/o state estimation" ablation
         self.norm_adv = True
         self.log_std_init = -0.5
+        self.log_std_max_xy = None        # SPEC D26: cap on the vx, vy exploration log-std (None = off)
         for k, v in kw.items():
             assert hasattr(self, k), k
             setattr(self, k, v)
@@ -75,6 +76,7 @@ class PPOTrainer:
         self.B = venv.num_envs
         self.policy = ShinPolicy(cfg.mode, log_std_init=cfg.log_std_init).to(self.device)
         self.opt = torch.optim.Adam(self.policy.parameters(), lr=cfg.lr, eps=1e-5)
+        self.clamp_log_std()                                  # D26 (no-op unless capped)
         self.total_updates = max(1, total_updates)
         self.update = 0
         self.global_step = 0
@@ -216,10 +218,19 @@ class PPOTrainer:
             stats.append((len(part), st))
         gn = torch.nn.utils.clip_grad_norm_(self.policy.parameters(), cfg.max_grad_norm)
         self.opt.step()
+        self.clamp_log_std()
         n = sum(w for w, _ in stats)
         agg = {k: sum(w * s[k] for w, s in stats) / n for k in stats[0][1]}
         agg["grad_norm"] = float(gn)
         return agg
+
+    def clamp_log_std(self):
+        """D26: keep the vx, vy exploration noise at or below the cap (after every optimizer step
+        and after loading a checkpoint)."""
+        cap = self.cfg.log_std_max_xy
+        if cap is not None:
+            with torch.no_grad():
+                self.policy.log_std[:2].clamp_(max=float(cap))
 
     def learn(self, buf):
         cfg = self.cfg

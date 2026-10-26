@@ -32,6 +32,14 @@ Smooth pad (--pad-smooth, SPEC D23): pad speed changes spread over each 0.1 s st
   run was trained (config.json "pad_smooth", else off). Folder suffix _smooth when on.
   The hold sit-down limit (config.json "hold_vz_down", D23) is always taken from the run.
 
+Noise per action part (--noise-dims, with --stochastic only; diagnostic): sample the policy noise
+  only on the listed parts of [vx, vy, vz, yaw rate]: x, y, z, w (e.g. xy, z, w). Default xyzw (all).
+  Folder suffix _n<dims> unless all.
+  --noise-xy-scale K (diagnostic): multiply the vx, vy noise by K. Folder suffix _nxy<K> unless 1.
+
+Vertical command low-pass (--action-lowpass ALPHA, SPEC D25): default as trained (config.json
+  "action_lowpass", else off). Folder suffix _lp<ALPHA> when on.
+
 Usage:
   python -m v5_shin.scripts.evaluate --run P_smoke_s1 --ckpt latest.pt --episodes 1000 --c 1.0
   python -m v5_shin.scripts.evaluate --run P_smoke_vz1_s1 --c 1.0 --motor sym_slow
@@ -66,7 +74,7 @@ def wilson(k, n, z=1.96):
 
 
 def _worker(args):
-    ckpt_path, cfg, seeds, c, stochastic, renderer, motor, inject, hold_steps, pad_smooth = args
+    ckpt_path, cfg, seeds, c, stochastic, renderer, motor, inject, hold_steps, pad_smooth, lowpass, nmask = args
     from v5_shin.envs.reward import ShinReward
     from v5_shin.envs.shin_env import ShinLandingEnv
     from v5_shin.policies.shin_policy import ShinPolicy
@@ -79,7 +87,8 @@ def _worker(args):
     env = ShinLandingEnv(mode=mode, renderer=renderer, egl=(renderer == "egl"), seed=0, c=c,
                          reward_fn=ShinReward(cfg.get("vz_penalty", "literal")),
                          vz_max=cfg.get("vz_max", 3.0), motor_mode=motor, hold_steps=hold_steps,
-                         hold_vz_down=cfg.get("hold_vz_down"), pad_smooth=pad_smooth)
+                         hold_vz_down=cfg.get("hold_vz_down"), pad_smooth=pad_smooth,
+                         action_lowpass=lowpass)
     keys = ("image", "u", "critic", "target", "s_rel") if mode == "vision" else ("u", "critic", "target", "s_rel")
     rows, frames = [], []
     try:
@@ -99,7 +108,7 @@ def _worker(args):
                                                      start[None], inject_true_state=inject)
                     mu = mu[0, 0]
                     if stochastic:
-                        a = mu + pol.log_std.exp() * torch.randn(mu.shape, generator=g)
+                        a = mu + pol.log_std.exp() * torch.randn(mu.shape, generator=g) * nmask
                     else:
                         a = mu
                 if s_est is not None:
@@ -136,12 +145,18 @@ def _worker(args):
 
 def evaluate(run, ckpt, episodes=1000, c=1.0, seed_base=9000, workers=8, stochastic=False,
              renderer="tiny", out=None, motor=None, inject_true_state=False, hold=False,
-             pad_smooth=None):
+             pad_smooth=None, action_lowpass=None, noise_dims="xyzw", noise_xy_scale=1.0):
     from v5_shin.envs import landing_sim as LS
     hold_steps = LS.HOLD_STEPS if hold else 0
     run_dir = os.path.join(RUNS, run)
     cfg = json.load(open(os.path.join(run_dir, "config.json")))
     pad_smooth = bool(cfg.get("pad_smooth", False)) if pad_smooth is None else bool(pad_smooth)
+    lowpass = cfg.get("action_lowpass") if action_lowpass is None else action_lowpass
+    lowpass = None if (lowpass is None or lowpass >= 1.0) else float(lowpass)
+    noise_dims = "".join(ch for ch in "xyzw" if ch in noise_dims)
+    assert noise_dims, "--noise-dims needs at least one of x, y, z, w"
+    nmask = torch.tensor([float(ch in noise_dims) for ch in "xyzw"])
+    nmask[:2] *= float(noise_xy_scale)
     trained_motor = cfg.get("motor", "asym")
     motor = motor or trained_motor
     if motor not in MOTOR_MODES:
@@ -151,7 +166,7 @@ def evaluate(run, ckpt, episodes=1000, c=1.0, seed_base=9000, workers=8, stochas
     seeds = [seed_base + i for i in range(episodes)]
     chunks = [seeds[i::workers] for i in range(workers) if seeds[i::workers]]
     args = [(os.path.join(run_dir, ckpt), cfg, ch, c, stochastic, renderer, motor, inject_true_state,
-             hold_steps, pad_smooth) for ch in chunks]
+             hold_steps, pad_smooth, lowpass, nmask) for ch in chunks]
     t0 = time.time()
     if len(args) == 1:
         res = [_worker(args[0])]
@@ -172,7 +187,9 @@ def evaluate(run, ckpt, episodes=1000, c=1.0, seed_base=9000, workers=8, stochas
                 policy="stochastic" if stochastic else "deterministic(mean)", renderer=renderer,
                 vz_max=cfg.get("vz_max", 3.0), mode=cfg["mode"], motor=motor,
                 trained_motor=trained_motor, inject_true_state=bool(inject_true_state),
-                pad_smooth=pad_smooth, hold_vz_down=cfg.get("hold_vz_down"),
+                pad_smooth=pad_smooth, hold_vz_down=cfg.get("hold_vz_down"), action_lowpass=lowpass,
+                noise_dims=(noise_dims if stochastic else None),
+                noise_xy_scale=(float(noise_xy_scale) if stochastic else None),
                 success_rate=oc["success"] / n, success_ci95=wilson(oc["success"], n),
                 strict_success_rate=strict / n, strict_ci95=wilson(strict, n), outcomes=oc,
                 impact_vz_median=float(np.median(vz)), impact_vz_p10=float(np.percentile(vz, 10)),
@@ -219,6 +236,12 @@ def evaluate(run, ckpt, episodes=1000, c=1.0, seed_base=9000, workers=8, stochas
         tag += "_hold"
     if pad_smooth:
         tag += "_smooth"
+    if lowpass is not None:
+        tag += f"_lp{lowpass:g}"
+    if stochastic and noise_dims != "xyzw":
+        tag += f"_n{noise_dims}"
+    if stochastic and float(noise_xy_scale) != 1.0:
+        tag += f"_nxy{float(noise_xy_scale):g}"
     out = out or os.path.join(run_dir, tag)
     os.makedirs(out, exist_ok=True)
     with open(os.path.join(out, "episodes.csv"), "w", newline="") as f:
@@ -248,11 +271,19 @@ def main():
                     help="D20: continue after touchdown; success = safe landing (hold)")
     ap.add_argument("--pad-smooth", choices=["auto", "on", "off"], default="auto",
                     help="D23 smooth pad speed changes (auto = as trained)")
+    ap.add_argument("--action-lowpass", type=float, default=None,
+                    help="D25 vz low-pass alpha in (0, 1]; 1 = off (default: as trained)")
+    ap.add_argument("--noise-dims", default="xyzw",
+                    help="with --stochastic: action parts that get noise (x, y, z, w)")
+    ap.add_argument("--noise-xy-scale", type=float, default=1.0,
+                    help="with --stochastic: multiply the vx, vy noise by this factor")
     a = ap.parse_args()
     for c in a.c:
         s, _ = evaluate(a.run, a.ckpt, a.episodes, c, a.seed_base, a.workers, a.stochastic, a.renderer,
                         motor=a.motor, inject_true_state=a.inject_true_state, hold=a.hold,
-                        pad_smooth={"auto": None, "on": True, "off": False}[a.pad_smooth])
+                        pad_smooth={"auto": None, "on": True, "off": False}[a.pad_smooth],
+                        action_lowpass=a.action_lowpass, noise_dims=a.noise_dims,
+                        noise_xy_scale=a.noise_xy_scale)
         show = {k: s[k] for k in ("run", "ckpt", "timestep", "c", "episodes", "policy", "motor", "trained_motor", "inject_true_state",
                                   "success_rate", "success_ci95", "strict_success_rate", "outcomes",
                                   "impact_vz_median", "impact_vz_p10", "impact_vz_p90",

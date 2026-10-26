@@ -1383,3 +1383,26 @@ Caveats: one seed per comparison; four learning-rate restarts on seed 1; no pair
 - Paper task unchanged (checked, c = 1, 1000 pinned episodes): A_s2_cont5 89.5% and P_base_s1
   80.9%, identical outcome counts and impact v_z; strict success differs by 1-2 episodes.
 - Test added (effective friction 0.5); 247 pass.
+
+### D25-D27 (26 Oct 2026): soft-landing bottleneck; vz low-pass (no effect); lateral noise cap; reward v5
+
+- P_td_v4s_s1 (v4 + practice 0.25 + sit-down 5 + friction 0.5, +2M from P_base_s1), hold task,
+  1000 pinned episodes, deterministic: c = 0.5 safe 20.2%, c = 1 safe 2.7%; touchdown 100% / 99.6%;
+  soft touchdowns 225 / 222, median impact -1.14 / -1.20 m/s. Stochastic: safe 0.1% / 0.0%, soft 22 / 28.
+  Hold alone from an on-pad start (diag_hold): c = 0.5 168/200 (oracle 200), c = 1 23/200 (oracle 135).
+  At c = 0.5, 202 of 225 soft touchdowns became safe landings: the landing, not the hold, now limits.
+- D25 vz low-pass (--action-lowpass, off by default): evaluated on the stochastic policy with
+  alpha 0.5 and 0.3: no effect (soft 16-22). Vertical jitter is not the cause. Kept off.
+- Noise per action part (evaluate --noise-dims): xy only -> soft 32 (like all noise, 28); z only
+  -> 238; yaw only -> 215. Lateral exploration noise causes the hard landings. Policy noise:
+  vx +-3.45, vy +-3.03 m/s, vz +-0.52 m/s, yaw +-0.10 rad/s.
+- Lateral noise tolerance (evaluate --noise-xy-scale): 0.5 -> soft 39, 0.25 -> 60, 0.1 -> 171
+  (clean 222). Even clean, the median impact is 1.20 m/s (> V_IMP).
+- D26 lateral noise cap (--log-std-max-xy, off by default): caps the vx, vy log-std at start,
+  after loading and after every optimizer step.
+- D27 reward v5: v4 reached its -10 hard-landing floor at 2 m/s, where most noisy training
+  landings are (median about 2.2 m/s), so softer landings got no gradient there. v5 = v4 with
+  hard landing -min(10, 5 + 2.5 (|v_z| - 1)): floor at 3 m/s, still always below a failed hold (-5).
+- Tests: test_block19_lowpass (4), test_block20_noise_cap (3), test_block21_reward_v5 (8); 262 pass.
+- Planned: P_td_v5_s1 (v5) and P_td_v5cap_s1 (v5 + log-std cap -2.5, about +-0.8 m/s lateral),
+  both + practice 0.25 + sit-down 5, +2M steps from P_base_s1. DEVIATION: LR restart at 1.5e-4.
