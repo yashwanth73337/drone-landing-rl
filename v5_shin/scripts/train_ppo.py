@@ -18,6 +18,8 @@ Usage (from the repo root). DO NOT start a run without the supervisor/owner's go
   checkpoint and after every optimizer step). Default off.
   --lr-restart (D28, with --resume): the linear LR schedule starts at --lr at the resumed update and
   falls to 0 at --total-steps (default: one schedule over the whole run history, as before).
+  --lr-warmup N (D29): the LR is also multiplied by (k + 1) / N for the first N updates k of the
+  schedule (k = 0 at the schedule start). Default 0 = off.
 
 Outputs in v5_shin/runs/<name>/:
   config.json            every argument + versions (tracked)
@@ -118,6 +120,8 @@ def main():
     ap.add_argument("--micro-chunks", type=int, default=None,
                     help="chunks per micro-batch (grad accumulation); vision on 4 GB: 8")
     ap.add_argument("--lr", type=float, default=3e-4)
+    ap.add_argument("--lr-warmup", type=int, default=0,
+                    help="D29: linear LR warm-up over this many updates (default 0 = off)")
     ap.add_argument("--lr-restart", action="store_true",
                     help="D28: with --resume, LR decays from --lr to 0 over this run only")
     ap.add_argument("--log-std-max-xy", type=float, default=None,
@@ -165,7 +169,7 @@ def main():
     cfg = PPOConfig(mode=a.mode, n_steps=a.n_steps, seq_len=a.seq_len, epochs=a.epochs,
                     minibatches=a.minibatches, micro_chunks=micro, lr=a.lr,
                     lambda_est=(a.lambda_est if a.mode == "vision" else 0.0),
-                    log_std_max_xy=a.log_std_max_xy)
+                    log_std_max_xy=a.log_std_max_xy, lr_warmup=a.lr_warmup)
     cur = Curriculum(start_level=a.start_level)
     venv = make_venv(a.mode, a.n_envs, a.seed, a.renderer, a.vz_penalty, cur.c, vz_max=a.vz_max,
                      motor_mode=a.motor, reward=a.reward, hold_practice=a.hold_practice,

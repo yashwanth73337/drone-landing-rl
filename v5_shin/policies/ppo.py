@@ -63,6 +63,7 @@ class PPOConfig:
         self.log_std_init = -0.5
         self.log_std_max_xy = None        # SPEC D26: cap on the vx, vy exploration log-std (None = off)
         self.lr_schedule_start = None     # SPEC D28: update where the linear LR decay starts (None = 0)
+        self.lr_warmup = 0                # SPEC D29: updates of linear LR warm-up from the schedule start
         for k, v in kw.items():
             assert hasattr(self, k), k
             setattr(self, k, v)
@@ -239,7 +240,8 @@ class PPOTrainer:
             for g in self.opt.param_groups:
                 s0 = cfg.lr_schedule_start or 0          # D28: --lr-restart sets it to the resumed update
                 frac = (self.update - s0) / max(1, self.total_updates - s0)
-                g["lr"] = cfg.lr * max(0.0, 1.0 - frac)
+                warm = min(1.0, (self.update - s0 + 1) / cfg.lr_warmup) if cfg.lr_warmup else 1.0  # D29
+                g["lr"] = cfg.lr * max(0.0, 1.0 - frac) * warm
         n_chunks_t = cfg.n_steps // cfg.seq_len
         all_chunks = [(k, b) for k in range(n_chunks_t) for b in range(self.B)]
         mb = max(1, len(all_chunks) // cfg.minibatches)

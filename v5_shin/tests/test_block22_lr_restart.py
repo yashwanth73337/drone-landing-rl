@@ -8,9 +8,9 @@ import torch
 from v5_shin.tests.test_block12_ppo import small_trainer
 
 
-def _lr_at(update, total, start):
+def _lr_at(update, total, start, warmup=0):
     torch.manual_seed(0)
-    tr = small_trainer(mode="privileged", n_steps=8, seq_len=4, lr=1e-3)
+    tr = small_trainer(mode="privileged", n_steps=8, seq_len=4, lr=1e-3, lr_warmup=warmup)
     try:
         tr.update, tr.total_updates, tr.cfg.lr_schedule_start = update, total, start
         buf, _ = tr.collect()
@@ -49,3 +49,15 @@ def test_train_script_lr_restart_end_to_end():
         assert float(rows[3]["lr"]) == pytest.approx(0.5e-3)
     finally:
         shutil.rmtree(run, ignore_errors=True)
+
+
+def test_warmup_ramps_the_lr():
+    """D29: with restart at update 5 and warm-up 4: k = 0..3 -> 1/4, 2/4, 3/4, 4/4 of the schedule."""
+    total, s0 = 25, 5
+    for k, w in [(0, 0.25), (1, 0.5), (3, 1.0), (6, 1.0)]:
+        lin = 1 - k / (total - s0)
+        assert _lr_at(s0 + k, total, s0, warmup=4) == pytest.approx(1e-3 * lin * w)
+
+
+def test_warmup_off_by_default():
+    assert _lr_at(5, 10, 5) == pytest.approx(1e-3)

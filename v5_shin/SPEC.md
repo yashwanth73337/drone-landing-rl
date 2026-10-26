@@ -1421,3 +1421,15 @@ Caveats: one seed per comparison; four learning-rate restarts on seed 1; no pair
   --total-steps. Needed for vision: A_s2_cont5 is at update 6348, so +2M steps without it would
   start at 2.1e-5 instead of 1.5e-4. Recorded in config.json (ppo.lr_schedule_start). DEVIATION as before.
 - Tests: test_block22_lr_restart.py (3); 265 pass.
+
+### D29 (26 Oct 2026): LR warm-up for the vision fine-tune
+
+- Vision smoke runs (A_s2_cont5 + v5 + practice 0.25 + sit-down 5, --lr-restart, 2 updates):
+  lr 1.5e-4 -> KL 19.3 then 2.1; lr 5e-5 -> KL 2.3 then 0.031. kl_first = 0.0 in all (no
+  rollout / update mismatch). The first update after a restart is far too large: the loaded Adam
+  moments are stale (end of the old run, near-zero LR), so the first steps are much bigger than lr.
+  Vision exploration noise: vx +-1.64, vy +-1.08, vz +-0.35 m/s, yaw +-0.03 rad/s (no cap needed).
+- D29 --lr-warmup N (off by default): LR multiplied by (k + 1) / N for the first N updates of the
+  schedule. Tests extended (test_block22); 267 pass.
+- Run A_s2_v5: A_s2_cont5 (26.0M) + v5 + practice 0.25 + sit-down 5 + friction 0.5, +2M steps,
+  peak lr 5e-5, warm-up 10 updates, --lr-restart. DEVIATION: LR schedule restart (as before).
