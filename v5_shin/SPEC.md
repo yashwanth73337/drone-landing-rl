@@ -1448,3 +1448,19 @@ Caveats: one seed per comparison; four learning-rate restarts on seed 1; no pair
   folder made with friction 0.25; old version in git history).
 - v6 = v5 + the v3 flare term in flight (dense, no floor). Tests: test_block23_reward_v6 (7); 274 pass.
 - Plan: P_td_v6_s1 (P check, as P_td_v5_s1 but v6), then A_s2_v6 (vision, peak lr 1e-4, warm-up 10).
+
+### D31 (27 Oct 2026): vision v6 result; teacher-student distillation (DAgger)
+
+- P_td_v6_s1 (P, v6, +2M): clean safe 80.0% (c 0.5) / 9.1% (c 1), soft touchdowns 972 / 927
+  (v5: 85.4 / 12.2%, 951 / 868). Softer landings, slightly weaker hold.
+- A_s2_v6 (vision, v6, +2M, peak lr 1e-4, warm-up 10): worse. c = 0.5: touchdown 77.0% (baseline
+  95.4%), platform crashes 152 (7), soft 23, safe 0%. c = 1: touchdown 69.5%. Likely reward hacking:
+  the flare applies only within 1.5 m of the pad, so the policy came in low from the side.
+- Conclusion: reward-only fine-tuning of the vision policy does not reach soft landing at a 2M budget.
+- D31 scripts/distill.py: DAgger. Teacher = P checkpoint (feed-forward, frozen; label = its mean
+  action clipped to [-1, 1], recomputed from stored obs). Student = vision policy (from a run or
+  scratch). Each episode the teacher flies with probability beta (linear decay beta0 -> 0 over
+  --beta-steps), else the student flies its mean action. Loss = MSE(student mu, teacher mu) +
+  lambda_est L_est; recurrent chunks as in PPO. Envs spread over levels 10..80. Hold task with
+  practice 0.25, sit-down 5, friction 0.5. Same checkpoint format as train_ppo.
+- Tests: test_block24_distill.py (8); 282 pass.
