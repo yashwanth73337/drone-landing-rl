@@ -40,6 +40,9 @@ TouchdownReward (SPEC D21, agreed 25 Oct 2026; needs the D20 hold, hold_steps > 
   v5 (SPEC D27): v4 with a gentler hard-landing slope so the penalty keeps a gradient up to 3 m/s
     (v4 reached its -10 floor at 2 m/s, where most noisy training landings are):
     hard_landing      -min(10, 5 + 2.5 (|impact v_z| - 1))
+
+  v6 (SPEC D30): v5 + the v3 flare term in flight (dense signal before contact, no floor), because
+    the vision policy lands at 3.3-3.7 m/s, beyond v5's -10 floor at 3 m/s.
 """
 import numpy as np
 
@@ -110,8 +113,9 @@ FLARE_K = 1.0           # 1/s, + 1 m/s of allowed descent per metre of height
 FLARE_D = 1.5           # m, horizontal distance within which the flare term applies
 W_FLARE = 1.0
 HARD_K = 5.0            # v2: penalty per m/s of impact speed above V_IMP
-VARIANTS = ("v1", "v2", "v3", "v4", "v5")
-HOLD_GRADED = ("v4", "v5")    # variants with the graded hold terms (D22)
+VARIANTS = ("v1", "v2", "v3", "v4", "v5", "v6")
+HOLD_GRADED = ("v4", "v5", "v6")    # variants with the graded hold terms (D22)
+FLARE_VARIANTS = ("v3", "v6")       # variants with the flare term in flight
 HARD_K_V5 = 2.5               # v5: penalty per m/s above V_IMP (floor -10 reached at 3 m/s)
 # v4 (D22)
 CENTRE_BONUS = 2.0      # at the pad centre, falling linearly to 0 at the pad edge
@@ -133,7 +137,7 @@ def hard_landing_reward(variant, impact_vz):
         return -min(10.0, HARD_K * (abs(float(impact_vz)) - V_IMP))
     if variant == "v4":
         return -min(10.0, -R_HOLD_FAIL_V4 + HARD_K * (abs(float(impact_vz)) - V_IMP))
-    if variant == "v5":
+    if variant in ("v5", "v6"):
         return -min(10.0, -R_HOLD_FAIL_V4 + HARD_K_V5 * (abs(float(impact_vz)) - V_IMP))
     return R_CRASH
 
@@ -163,7 +167,7 @@ class TouchdownReward(ShinReward):
         d, dz, vz = geometry(env.sim)
         terms = shaping_terms(self.d_prev, d, self.adz_prev, abs(dz), dz, vz,
                               info["action_cmd"][3], self.vz_penalty)
-        if self.variant == "v3":
+        if self.variant in FLARE_VARIANTS:
             terms["flare"] = W_FLARE * flare_term(d, dz, vz)
         self.d_prev, self.adz_prev = d, abs(dz)
         outcome = info.get("outcome")

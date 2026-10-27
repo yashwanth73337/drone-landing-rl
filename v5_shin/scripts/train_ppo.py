@@ -5,8 +5,8 @@ Usage (from the repo root). DO NOT start a run without the supervisor/owner's go
   python -m v5_shin.scripts.train_ppo --mode vision --name A_s1 --seed 1 --total-steps 20000000
   --motor {asym,sym_slow,sym_fast}: motor time constants (default asym = AerialGym LMF2, the
   paper's setting). sym_* are DIAGNOSTIC ablations of the actuator sink (SPEC §15, 1 Oct).
-  --reward {paper,v1,v2,v3,v4,v5}: paper = Table III (default). v1-v5 = touchdown-aware reward
-  (SPEC D21, D22, D27) and they switch on the post-touchdown hold (SPEC D20); success = safe landing.
+  --reward {paper,v1,...,v6}: paper = Table III (default). v1-v6 = touchdown-aware reward
+  (SPEC D21, D22, D27, D30) and they switch on the post-touchdown hold (SPEC D20); success = safe landing.
   --hold-practice P (D22, needs v1-v4): share of training episodes that start resting on the pad
   in the hold phase. These are logged (episodes.csv column 'practice', updates.csv n_practice*)
   but never counted for the curriculum or the success / outcome columns. Default 0 = off.
@@ -135,7 +135,7 @@ def main():
                     help="vertical-speed action limit (m/s); D16 default 1.0 (P_smoke_s1 used 3.0)")
     ap.add_argument("--motor", choices=["asym", "sym_slow", "sym_fast"], default="asym",
                     help="motor time constants; asym = AerialGym LMF2 (default); sym_* = diagnostic")
-    ap.add_argument("--reward", choices=["paper", "v1", "v2", "v3", "v4", "v5"], default="paper",
+    ap.add_argument("--reward", choices=["paper", "v1", "v2", "v3", "v4", "v5", "v6"], default="paper",
                     help="paper = Table III; v1-v4 = touchdown-aware (D21, D22) with the hold (D20)")
     ap.add_argument("--hold-practice", type=float, default=0.0,
                     help="D22: share of training episodes starting on the pad (needs v1-v4)")
@@ -153,9 +153,9 @@ def main():
     a = ap.parse_args()
     hold = a.reward != "paper"
     if not 0.0 <= a.hold_practice <= 1.0 or (a.hold_practice > 0 and not hold):
-        ap.error("--hold-practice must be in [0, 1] and needs --reward v1-v5")
+        ap.error("--hold-practice must be in [0, 1] and needs --reward v1-v6")
     if a.hold_vz_down is not None and (not hold or a.hold_vz_down < a.vz_max):
-        ap.error("--hold-vz-down needs --reward v1-v5 and must be >= --vz-max")
+        ap.error("--hold-vz-down needs --reward v1-v6 and must be >= --vz-max")
     if a.action_lowpass is not None and not 0.0 < a.action_lowpass <= 1.0:
         ap.error("--action-lowpass must be in (0, 1]")
 

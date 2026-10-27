@@ -1,0 +1,102 @@
+{
+  "run": "A_s2_v5",
+  "ckpt": "u06450.pt",
+  "timestep": 26419200,
+  "c": 0.5,
+  "episodes": 1000,
+  "seed_base": 9000,
+  "policy": "deterministic(mean)",
+  "renderer": "tiny",
+  "vz_max": 1.0,
+  "mode": "vision",
+  "motor": "asym",
+  "trained_motor": "asym",
+  "inject_true_state": false,
+  "pad_smooth": false,
+  "hold_vz_down": 5.0,
+  "action_lowpass": null,
+  "noise_dims": null,
+  "noise_xy_scale": null,
+  "success_rate": 0.0,
+  "success_ci95": [
+    0.0,
+    0.003826898586390522
+  ],
+  "strict_success_rate": 0.0,
+  "strict_ci95": [
+    0.0,
+    0.003826898586390522
+  ],
+  "outcomes": {
+    "success": 0,
+    "crash_ground": 34,
+    "crash_platform": 23,
+    "tilt": 5,
+    "drift": 0,
+    "timeout": 0,
+    "hard_landing": 938,
+    "bounce": 0,
+    "slide_off": 0,
+    "tip_over": 0,
+    "not_still": 0
+  },
+  "impact_vz_median": NaN,
+  "impact_vz_p10": NaN,
+  "impact_vz_p90": NaN,
+  "impact_speed_median": null,
+  "steps_to_land_median": null,
+  "safe_success": {
+    "<=0.5": 0.0,
+    "<=1.0": 0.0,
+    "<=1.5": 0.0,
+    "<=2.0": 0.0
+  },
+  "safe_strict_success": {
+    "<=0.5": 0.0,
+    "<=1.0": 0.0,
+    "<=1.5": 0.0,
+    "<=2.0": 0.0
+  },
+  "cmd_vz_last5_median": null,
+  "wall_s": 236.1,
+  "hold": {
+    "hold_steps": 10,
+    "hold_still_steps": 5,
+    "v_imp": 1.0,
+    "v_still": 0.1,
+    "hold_tilt_max_deg": 29.999999999999996
+  },
+  "touchdown_rate": 0.938,
+  "touchdown_ci95": [
+    0.9213116000993365,
+    0.9513360367389853
+  ],
+  "touchdown_impact_vz_median": -3.534960732139294,
+  "touchdown_impact_vz_p10": -4.589923217352527,
+  "touchdown_impact_vz_p90": -2.450888450082619,
+  "update": 6450,
+  "est_pos_rmse_m": 0.3423614799976349,
+  "est_vel_rmse_ms": 0.8287217617034912,
+  "est_pos_err_by_blind_age": {
+    "0-0": {
+      "n": 15407,
+      "mean_m": 0.17884250702956628
+    },
+    "1-15": {
+      "n": 6788,
+      "mean_m": 0.37969474526644675
+    },
+    "16-60": {
+      "n": 47,
+      "mean_m": 1.2622297193775787
+    },
+    "61-120": {
+      "n": 0,
+      "mean_m": null
+    },
+    "121-inf": {
+      "n": 0,
+      "mean_m": null
+    }
+  }
+}

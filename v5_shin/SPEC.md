@@ -1433,3 +1433,18 @@ Caveats: one seed per comparison; four learning-rate restarts on seed 1; no pair
   schedule. Tests extended (test_block22); 267 pass.
 - Run A_s2_v5: A_s2_cont5 (26.0M) + v5 + practice 0.25 + sit-down 5 + friction 0.5, +2M steps,
   peak lr 5e-5, warm-up 10 updates, --lr-restart. DEVIATION: LR schedule restart (as before).
+
+### D30 (27 Oct 2026): vision fine-tune with v5 failed; reward v6 = v5 + flare
+
+- A_s2_v5 (A_s2_cont5 26.0M + v5 + practice 0.25 + sit-down 5, +2M steps, peak lr 5e-5, warm-up
+  10, lr restart; about 6.5 h at 82 sps). Clean hold task, 1000 pinned episodes:
+  c = 0.5: safe 0.0% (baseline 0.0%), soft touchdowns 11 (baseline 1), impact -3.25 (baseline -3.72);
+  c = 1: safe 0.0%, touchdown 83.9% (baseline 89.5% in the D24 sim), ground crashes 86 (48).
+  Intermediate checkpoints u6450, u6600, u6750 at c = 0.5: safe 0.0%, soft 0-5: no trend.
+- Likely cause: vision landings are at 3.3-3.7 m/s, beyond v5's -10 floor at 3 m/s, so no gradient
+  (same blind spot as v4 for P); lr also 3x lower than for P. Training KL 0.1-1.1 reflects the very
+  small vision action std (yaw 0.03, vy 0.11, vx 0.16 in action units), not large physical changes.
+- Baseline A_s2_cont5 hold-task folders re-evaluated in the D24 sim (c = 1 overwrites the 25 Oct
+  folder made with friction 0.25; old version in git history).
+- v6 = v5 + the v3 flare term in flight (dense, no floor). Tests: test_block23_reward_v6 (7); 274 pass.
+- Plan: P_td_v6_s1 (P check, as P_td_v5_s1 but v6), then A_s2_v6 (vision, peak lr 1e-4, warm-up 10).
