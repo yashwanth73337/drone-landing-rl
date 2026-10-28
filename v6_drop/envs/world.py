@@ -1,8 +1,31 @@
 """v6_drop B5: the world. Puts B1-B4 together: ground, Stage 1 platform with the
 L70_12 pad, LMF2 drone, 60 deg camera, and the Stage 1 start rules.
 
-No RL yet: no observation vector, no reward, no termination, no drop action
-(those are Part C and Steps 4-5). This file only does reset() and step(cmd).
+No RL yet: no observation vector and no reward (Steps 4-5). reset() starts an
+episode; step(cmd, drop) runs one decision and, since C1, ends the episode with an
+outcome (flight checks, the drop, the auto-cut on touch, and the five landing checks).
+
+C1 rules (decided 28 Oct):
+  Flight (checked every physics step, motors on):
+    crash_ground    any drone contact with the ground
+    crash_platform  contact with the platform that is not on its top face
+    flip            tilt > 80 deg
+    lost            > 15 m from the pad horizontally, or > 12 m above the pad top
+    timeout         300 decisions (30 s) without an outcome  (TRUNCATION, not termination)
+  Touchdown: the motors go OFF for the rest of the episode when
+    (a) the policy chooses drop=True (motors off at the start of that decision), or
+    (b) any foot first touches the pad top with the motors still on (AUTO-CUT, Option A).
+  After the motors go off, the simulator runs a 2 s window inside the same step() and
+  judges the landing, in this order:
+    1 first contact must be the pad TOP     else crash_platform / crash_ground
+    2 impact speed rel. to the pad <= 1.0   else hard_landing   (episode ends at impact)
+    3 tilt <= 30 deg during the window       else tip_over
+    4 centre stays over the pad              else slide_off
+    5 |v_rel| <= 0.1 m/s at the end          else not_still
+    all five pass -> success (= a SAFE landing). impact <= 0.5 m/s is reported too.
+  Impact speed: after a drop only gravity acts, so it is computed EXACTLY by energy
+  conservation from the state at the drop: v_touch = sqrt(vz0^2 + 2 g gap0) (D4). For an
+  auto-cut touch (thrust on until the touch) the per-step reading is used (+-0.1 m/s).
 
 Start rules (decided 28 Oct; Shin-like, scaled down for Stage 1):
   pad       centre at the world origin, heading +x, speed v ~ U(0, 4) m/s (B2)
@@ -32,7 +55,7 @@ import pybullet as p
 from . import lmf2_params as P
 from . import pad_board as PB
 from .camera import Camera
-from .platform_s1 import PAD_TOP_Z, set_contact_friction
+from .platform_s1 import PAD_SIZE, PAD_TOP_Z, set_contact_friction
 from .quad import LMF2Quad, MotorModel, make_client
 from .lee_controller import LeeVelocityController
 
@@ -45,6 +68,20 @@ W0_MAX = np.radians(10.0)          # rad/s per axis, body frame
 FOV_MARGIN_PX = 10
 MAX_TRIES = 200
 GROUND_GREY = 0.45
+# ---- C1 flight checks (V5 values; horizon as Shin et al.) --------------------------
+HORIZON = 300                      # decisions (30 s)
+TILT_FLIGHT_MAX = np.radians(80.0)
+LOST_XY = 15.0                     # m from the pad centre, horizontally
+LOST_Z = 12.0                      # m above the pad top
+TOP_NORMAL_MIN = 0.7               # contact normal z above this = the pad's TOP face
+# ---- C1 landing checks (agreed 24-28 Oct) ----------------------------------------------
+SETTLE_T = 2.0                     # s with motors off after the touchdown/drop (D1: 2 s)
+V_IMPACT_MAX = 1.0                 # m/s, impact speed relative to the pad
+V_IMPACT_STRICT = 0.5              # m/s, stricter extra metric (reported only)
+TILT_LAND_MAX = np.radians(30.0)
+V_STILL = 0.1                      # m/s, |v_drone - v_pad| at the end of the window
+OUTCOMES = ("success", "hard_landing", "tip_over", "slide_off", "not_still",
+            "crash_platform", "crash_ground", "flip", "lost", "timeout")
 
 
 def euler_R(roll, pitch, yaw):
@@ -72,8 +109,10 @@ class World:
         self.quad = LMF2Quad(self.cid, self.rng_gains, self.gains)
         set_contact_friction(self.cid, self.plat.body, self.quad.body)
         self.cam = Camera(self.cid, renderer=renderer)
+        self.plat_half = PAD_SIZE / 2
         self.det = PB.detector()
         self.t = 0                       # decisions since reset (0.1 s each)
+        self.done = True                 # call reset() first
 
     # ---- setup ----------------------------------------------------------------------
     def _seed_streams(self, seed):
@@ -151,20 +190,154 @@ class World:
         self.quad.ext_torque[:] = 0.0
         p.performCollisionDetection(physicsClientId=self.cid)
         self.t = 0
+        self.done = False
         if img is None:
             img = self.render()
             meas = PB.measure(img, self.cam, self.layout, self.det)
         return dict(image=img, spawn=spawn, measurement=meas, tries=tries)
 
     # ---- one decision ----------------------------------------------------------------
-    def step(self, cmd):
-        """Hold cmd = [vx, vy, vz, yaw_rate] (heading frame) for one decision:
-        10 physics steps of 0.01 s. The pad moves with D19 sync inside."""
+    def step(self, cmd, drop=False):
+        """One decision (0.1 s). cmd = [vx, vy, vz, yaw_rate] (heading frame), held for 10
+        physics steps. drop=True cuts the motors now and judges the landing (2 s window).
+        Returns (terminated, truncated, info); info['outcome'] is None while flying."""
+        assert not self.done, "episode over: call reset()"
+        if drop:
+            info = self._touchdown_phase(reason="drop")
+            return self._finish(info, truncated=False)
         for _ in range(P.SUBSTEPS):
+            v_pre = self.quad.state()["v"].copy()
             self.quad.apply_control(cmd)
             p.stepSimulation(physicsClientId=self.cid)
             self.plat.integrate()
+            kind = self._contact_kind()
+            if kind == "top":                                      # AUTO-CUT (Option A)
+                info = self._touchdown_phase(reason="auto_cut", v_pre=v_pre, already_touching=True)
+                return self._finish(info, truncated=False)
+            if kind in ("ground", "side"):
+                return self._finish(self._flight_end("crash_ground" if kind == "ground"
+                                                     else "crash_platform"), truncated=False)
+            if self._tilt() > TILT_FLIGHT_MAX:
+                return self._finish(self._flight_end("flip"), truncated=False)
         self.t += 1
+        s = self.true_state()
+        rel = s["pos"] - s["pad_center"]
+        if np.hypot(rel[0], rel[1]) > LOST_XY or rel[2] > LOST_Z:
+            return self._finish(self._flight_end("lost", count_step=False), truncated=False)
+        if self.t >= HORIZON:
+            return self._finish(self._flight_end("timeout", count_step=False), truncated=True)
+        return False, False, dict(outcome=None, t=self.t)
+
+    # ---- helpers ------------------------------------------------------------------------
+    def _finish(self, info, truncated):
+        self.done = True
+        info["t"] = self.t
+        return (not truncated), truncated, info
+
+    def _flight_end(self, outcome, count_step=True):
+        if count_step:
+            self.t += 1
+        return dict(outcome=outcome, touchdown=None)
+
+    def _tilt(self):
+        R = self.quad.state()["R"]
+        return float(np.arccos(np.clip(R[2, 2], -1.0, 1.0)))
+
+    def _contact_kind(self):
+        """'top' if the drone touches the pad's top face, 'side' if it touches the
+        platform only elsewhere, 'ground' if it touches the ground, else None."""
+        cid, d = self.cid, self.quad.body
+        if p.getContactPoints(bodyA=d, bodyB=self.ground, physicsClientId=cid):
+            return "ground"
+        cps = p.getContactPoints(bodyA=d, bodyB=self.plat.body, physicsClientId=cid)
+        if not cps:
+            return None
+        # contactNormalOnB (index 7) points from the platform (B) towards the drone (A)
+        if any(c[7][2] > TOP_NORMAL_MIN for c in cps):
+            return "top"
+        return "side"
+
+    _FEET_B = np.array([[sx * P.FOOT_XY, sy * P.FOOT_XY, P.FOOT_Z]
+                        for sx in (1, -1) for sy in (1, -1)])
+    _BODY_CORNERS_B = np.array([[sx * 0.08, sy * 0.08, -0.03] for sx in (1, -1) for sy in (1, -1)])
+
+    def _lowest_z(self):
+        """Height of the drone's lowest point, from its geometry (feet spheres and the
+        body's bottom corners). Not getAABB: PyBullet pads the AABB by ~1 mm."""
+        s = self.quad.state()
+        feet = s["pos"] + self._FEET_B @ s["R"].T
+        body = s["pos"] + self._BODY_CORNERS_B @ s["R"].T
+        return float(min(feet[:, 2].min() - P.FOOT_R, body[:, 2].min()))
+
+    def _motors_off_step(self):
+        """One physics step with the motors OFF: no thrust, no torque (cut instantly;
+        the LMF2 motors spin down in 5 ms anyway)."""
+        self.quad.motors.thrust[:] = 0.0
+        self.quad.last_wrench = np.zeros(4)
+        p.stepSimulation(physicsClientId=self.cid)
+        self.plat.integrate()
+
+    def _touchdown_phase(self, reason, v_pre=None, already_touching=False):
+        """Motors off; judge the landing over a SETTLE_T window (the five checks)."""
+        n_win = int(round(SETTLE_T / P.PHYSICS_DT))
+        td = dict(reason=reason, impact=None, impact_method=None, land_xy=None,
+                  tilt_max_deg=0.0, slide=None, v_rel_end=None, strict_soft=None)
+        k0 = 0
+        if already_touching:                       # auto-cut: contact happened this substep
+            first = "top"
+            vz_rel = v_pre[2] - self.plat.velocity()[2]
+            td["impact"], td["impact_method"] = float(max(0.0, -vz_rel)), "step_reading"
+        else:                                      # drop: free fall until the first contact
+            # D4: after the cut only gravity acts, so energy conservation gives the exact
+            # (continuous-physics) impact speed from the state AT THE DROP:
+            #   v_touch^2 = vz0^2 + 2 g (gap at the drop)
+            # This is free of the per-step resolution. (Using the last look before contact
+            # instead is NOT exact: PyBullet's semi-implicit Euler falls slightly faster
+            # than continuous physics, so that version was off by up to 0.04 m/s.)
+            vz0 = self.quad.state()["v"][2] - self.plat.velocity()[2]
+            low0 = self._lowest_z()
+            first = None
+            for k0 in range(1, n_win + 1):
+                self._motors_off_step()
+                first = self._contact_kind()
+                if first is not None:
+                    gap0 = low0 - (PAD_TOP_Z if first == "top" else 0.0)
+                    td["impact"] = float(np.sqrt(max(vz0 * vz0 + 2.0 * P.G * gap0, 0.0)))
+                    td["impact_method"] = "free_fall_exact"
+                    break
+            if first is None:                      # (cannot happen within 2 s near the pad)
+                return dict(outcome="crash_ground", touchdown=td)
+        s = self.true_state()
+        land_xy = self.plat.world_to_pad([s["pos"]])[0]
+        td["land_xy"] = land_xy.tolist()
+        if first == "ground":
+            return dict(outcome="crash_ground", touchdown=td)
+        if first == "side":
+            return dict(outcome="crash_platform", touchdown=td)
+        td["strict_soft"] = bool(td["impact"] <= V_IMPACT_STRICT)
+        if td["impact"] > V_IMPACT_MAX:                                   # check 2
+            return dict(outcome="hard_landing", touchdown=td)
+        half = self.plat_half
+        for _ in range(k0, n_win):
+            self._motors_off_step()
+            tilt = self._tilt()
+            td["tilt_max_deg"] = max(td["tilt_max_deg"], float(np.degrees(tilt)))
+            s = self.true_state()
+            xy = self.plat.world_to_pad([s["pos"]])[0]
+            if tilt > TILT_LAND_MAX:                                       # check 3
+                return dict(outcome="tip_over", touchdown=td)
+            if abs(xy[0]) > half or abs(xy[1]) > half:                     # check 4
+                td["slide"] = float(np.linalg.norm(xy - land_xy))
+                return dict(outcome="slide_off", touchdown=td)
+            if self._contact_kind() == "ground":
+                return dict(outcome="crash_ground", touchdown=td)
+        s = self.true_state()
+        xy = self.plat.world_to_pad([s["pos"]])[0]
+        td["slide"] = float(np.linalg.norm(xy - land_xy))
+        td["v_rel_end"] = float(np.linalg.norm(s["v"] - s["pad_v"]))
+        if td["v_rel_end"] > V_STILL:                                      # check 5
+            return dict(outcome="not_still", touchdown=td)
+        return dict(outcome="success", touchdown=td)
 
     def render(self):
         s = self.quad.state()

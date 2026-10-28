@@ -157,8 +157,10 @@ def test_timing(world):
     world.reset()
     n, t0 = 100, time.time()
     for _ in range(n):
-        world.step([0.5, 0.0, 0.0, 0.0])
+        term, trunc, _ = world.step([0.5, 0.0, 0.0, 0.0])
         PB.measure(world.render(), world.cam, world.layout, world.det)
+        if term or trunc:                                      # C1: episodes can end now
+            world.reset()
     rate = n / (time.time() - t0)
     print(f"\n[timing {RENDERER}] {rate:.0f} decisions/s (10 physics steps + 1 render + ArUco)")
     assert rate > 5
