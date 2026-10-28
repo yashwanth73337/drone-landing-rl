@@ -18,6 +18,8 @@ Usage (from the repo root). DO NOT start a run without the supervisor/owner's go
   checkpoint and after every optimizer step). Default off.
   --lr-restart (D28, with --resume): the linear LR schedule starts at --lr at the resumed update and
   falls to 0 at --total-steps (default: one schedule over the whole run history, as before).
+  --resume from a distill.py checkpoint (D32): it has no curriculum state, so the run starts at
+  --start-level, and the update counter is set to global_step // (n_envs * n_steps).
   --lr-warmup N (D29): the LR is also multiplied by (k + 1) / N for the first N updates k of the
   schedule (k = 0 at the schedule start). Default 0 = off.
 
@@ -182,9 +184,15 @@ def main():
         d = torch.load(os.path.join(run, "latest.pt"), map_location=a.device, weights_only=False)
         extra = tr.load_state_dict(d)
         tr.clamp_log_std()                       # D26 (no-op unless --log-std-max-xy)
+        if "curriculum" in extra:
+            cur = Curriculum.from_state_dict(extra["curriculum"])
+        else:                                    # D32: checkpoint from distill.py
+            cur = Curriculum(start_level=a.start_level)
+            tr.update = tr.global_step // per_update   # align the PPO update counter with the steps
+            print(f"[D32] checkpoint without curriculum (distill.py): level {cur.level}, "
+                  f"update set to {tr.update} from global_step {tr.global_step}", flush=True)
         if a.lr_restart:                         # D28
             tr.cfg.lr_schedule_start = tr.update
-        cur = Curriculum.from_state_dict(extra["curriculum"])
         venv.call("set_c", cur.c)
     if not a.resume or not os.path.exists(os.path.join(run, "config.json")):
         with open(os.path.join(run, "config.json"), "w") as f:

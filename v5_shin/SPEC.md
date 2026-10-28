@@ -1464,3 +1464,17 @@ Caveats: one seed per comparison; four learning-rate restarts on seed 1; no pair
   lambda_est L_est; recurrent chunks as in PPO. Envs spread over levels 10..80. Hold task with
   practice 0.25, sit-down 5, friction 0.5. Same checkpoint format as train_ppo.
 - Tests: test_block24_distill.py (8); 282 pass.
+
+### D32 (28 Oct 2026): distillation result; PPO resume from a distill checkpoint
+
+- D_s2_ft: student from A_s2_cont5 (26.0M), teacher P_td_v5_s1, 2M steps, beta 1 -> 0 over 1M,
+  lr 1e-4, envs over levels 10..80. Clean hold task, 1000 pinned episodes, c = 0.5:
+  safe 13.9 / 27.2 / 33.0 / 29.8% at 0.41 / 1.02 / 1.54 / 2.00M (baseline 0.0%, teacher 85.4%);
+  touchdown 57.1 / 85.0 / 93.0 / 84.6% (baseline 95.4%); impact -0.73 to -0.92 m/s (baseline -3.72).
+  c = 1 at 2.00M: safe 1.5%, touchdown 57.5% (baseline 89.5%), ground crashes 228 (48).
+- Reading: distillation transfers the soft landing to vision; the best checkpoint is u00375
+  (1.54M). Tracking at c = 1 got worse, likely because the privileged teacher flies in ways the
+  camera cannot follow (pad out of view).
+- D32 train_ppo --resume from a distill.py checkpoint (no curriculum): starts at --start-level and
+  sets the PPO update counter to global_step // (n_envs * n_steps). Test: test_block25 (1); 283 pass.
+- Next: DR_s2 = PPO (v5) fine-tune from D_s2_ft/u00375, to repair camera-based tracking.

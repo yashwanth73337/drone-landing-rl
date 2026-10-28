@@ -1,0 +1,102 @@
+{
+  "run": "D_s2_ft",
+  "ckpt": "u00375.pt",
+  "timestep": 27537408,
+  "c": 0.5,
+  "episodes": 1000,
+  "seed_base": 9000,
+  "policy": "deterministic(mean)",
+  "renderer": "tiny",
+  "vz_max": 1.0,
+  "mode": "vision",
+  "motor": "asym",
+  "trained_motor": "asym",
+  "inject_true_state": false,
+  "pad_smooth": false,
+  "hold_vz_down": 5.0,
+  "action_lowpass": null,
+  "noise_dims": null,
+  "noise_xy_scale": null,
+  "success_rate": 0.33,
+  "success_ci95": [
+    0.3015550314798513,
+    0.3597461140395216
+  ],
+  "strict_success_rate": 0.33,
+  "strict_ci95": [
+    0.3015550314798513,
+    0.3597461140395216
+  ],
+  "outcomes": {
+    "success": 330,
+    "crash_ground": 40,
+    "crash_platform": 27,
+    "tilt": 0,
+    "drift": 3,
+    "timeout": 0,
+    "hard_landing": 254,
+    "bounce": 1,
+    "slide_off": 121,
+    "tip_over": 68,
+    "not_still": 156
+  },
+  "impact_vz_median": -0.7064924901912338,
+  "impact_vz_p10": -0.9241131350098626,
+  "impact_vz_p90": -0.4622750822803036,
+  "impact_speed_median": 0.9934090276162016,
+  "steps_to_land_median": 53.0,
+  "safe_success": {
+    "<=0.5": 0.045,
+    "<=1.0": 0.33,
+    "<=1.5": 0.33,
+    "<=2.0": 0.33
+  },
+  "safe_strict_success": {
+    "<=0.5": 0.045,
+    "<=1.0": 0.33,
+    "<=1.5": 0.33,
+    "<=2.0": 0.33
+  },
+  "cmd_vz_last5_median": -4.801788568496704,
+  "wall_s": 521.0,
+  "hold": {
+    "hold_steps": 10,
+    "hold_still_steps": 5,
+    "v_imp": 1.0,
+    "v_still": 0.1,
+    "hold_tilt_max_deg": 29.999999999999996
+  },
+  "touchdown_rate": 0.93,
+  "touchdown_ci95": [
+    0.912484997993282,
+    0.9442238692224224
+  ],
+  "touchdown_impact_vz_median": -0.7970786079115606,
+  "touchdown_impact_vz_p10": -1.1956815520060418,
+  "touchdown_impact_vz_p90": -0.4733975114007372,
+  "update": 375,
+  "est_pos_rmse_m": 1.1846553087234497,
+  "est_vel_rmse_ms": 0.8687223792076111,
+  "est_pos_err_by_blind_age": {
+    "0-0": {
+      "n": 22750,
+      "mean_m": 0.23154896921885537
+    },
+    "1-15": {
+      "n": 23241,
+      "mean_m": 0.4009658327165448
+    },
+    "16-60": {
+      "n": 4218,
+      "mean_m": 1.7632213752768005
+    },
+    "61-120": {
+      "n": 18,
+      "mean_m": 15.160112659136454
+    },
+    "121-inf": {
+      "n": 0,
+      "mean_m": null
+    }
+  }
+}
