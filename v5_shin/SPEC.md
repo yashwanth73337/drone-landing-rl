@@ -1478,3 +1478,14 @@ Caveats: one seed per comparison; four learning-rate restarts on seed 1; no pair
 - D32 train_ppo --resume from a distill.py checkpoint (no curriculum): starts at --start-level and
   sets the PPO update counter to global_step // (n_envs * n_steps). Test: test_block25 (1); 283 pass.
 - Next: DR_s2 = PPO (v5) fine-tune from D_s2_ft/u00375, to repair camera-based tracking.
+
+### D33 (28 Oct 2026): distillation + PPO fine-tune (DR_s2) result
+
+- DR_s2: PPO (v5, practice 0.25, sit-down 5, L80) from D_s2_ft/u00375, +2M steps, peak lr 1e-4,
+  warm-up 10, lr restart. Clean hold task, 1000 pinned episodes:
+  c = 0.5: safe 26.0 / 42.2 / 62.0% [59.0, 65.0] at +0.5 / +1.1 / +2.0M; touchdown 98.8%
+  (baseline 95.4%); soft 956; impact -0.60 m/s (baseline -3.72).
+  c = 1 at +2.0M: safe 6.7%; touchdown 89.9% (baseline 89.5%); soft 827; ground crashes 42
+  (distilled 228); slide_off 351, not_still 348 (hold limited, cf. D24 friction ceiling).
+- Reading: distillation transfers the soft landing; RL then repairs camera-based tracking. Still
+  improving at the end. One seed only.
