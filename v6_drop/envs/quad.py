@@ -1,0 +1,113 @@
+"""v6_drop B1: the LMF2 drone in raw PyBullet.
+
+Copied from v5_shin/envs/quad.py at e17f91e, with one simplification:
+the diagnostic motor modes ('sym_slow', 'sym_fast') are removed. v6 always
+uses the AerialGym LMF2 motors (spin-up 50-80 ms, spin-down 5 ms).
+
+What this file does, in order, every physics step (0.01 s):
+  1. read the drone state (position, velocity, attitude, body rates)
+  2. Lee controller: velocity command -> wanted total thrust + 3 torques
+  3. allocation: thrust + torques -> 4 motor thrusts (and back)
+  4. motor model: each motor moves toward its wanted thrust with a lag
+  5. apply the resulting force and torque to the body in PyBullet
+"""
+import os
+
+import numpy as np
+import pybullet as p
+
+from . import lmf2_params as P
+from .lee_controller import LeeVelocityController
+
+URDF = os.path.join(os.path.dirname(__file__), "..", "assets", "lmf2.urdf")
+
+
+class MotorModel:
+    """AerialGym rpm-space first-order model, Euler discretisation with the
+    'discrete' mixing factor 1/(dt + tau). The thrust constant cancels.
+    Spin-up tau ~ U(0.05, 0.08) s per motor (drawn from rng), spin-down 0.005 s."""
+
+    def __init__(self, rng, dt=P.PHYSICS_DT):
+        self.dt = dt
+        self.tau_inc = rng.uniform(*P.TAU_INC_RANGE, size=4)
+        self.tau_dec = np.full(4, P.TAU_DEC)
+        self.thrust = np.full(4, P.MASS * P.G / 4.0)
+
+    def reset(self, thrust=None):
+        self.thrust[:] = P.MASS * P.G / 4.0 if thrust is None else thrust
+
+    def update(self, ref):
+        ref = np.clip(ref, P.MOTOR_MIN_THRUST, P.MOTOR_MAX_THRUST)
+        err = ref - self.thrust
+        tau = np.where(err < 0, self.tau_dec, self.tau_inc)
+        a = self.dt / (self.dt + tau)
+        s = np.sqrt(self.thrust)
+        s = s + a * (np.sqrt(ref) - s)
+        self.thrust = s * s
+        return self.thrust
+
+
+class LMF2Quad:
+    """Owns one drone body inside an existing PyBullet client."""
+
+    def __init__(self, client, rng, gains):
+        self.cid = client
+        # URDF_USE_INERTIA_FROM_FILE is essential: without it PyBullet computes
+        # inertia from the 0.5 m collision box (0.052 kg m^2, ~4x too large).
+        self.body = p.loadURDF(URDF, [0, 0, 1], flags=p.URDF_USE_INERTIA_FROM_FILE,
+                               physicsClientId=client)
+        p.changeDynamics(self.body, -1, linearDamping=P.LINEAR_DAMPING,
+                         angularDamping=P.ANGULAR_DAMPING, physicsClientId=client)
+        self.motors = MotorModel(rng)
+        self.ctrl = LeeVelocityController(gains)
+        self.last_wrench = np.zeros(4)
+        self.ext_force = np.zeros(3)    # world frame, N   (disturbances; zero in Stage 1)
+        self.ext_torque = np.zeros(3)   # body frame, N m  (disturbances; zero in Stage 1)
+
+    # ---- state --------------------------------------------------------------
+    def state(self):
+        pos, quat = p.getBasePositionAndOrientation(self.body, physicsClientId=self.cid)
+        v, w = p.getBaseVelocity(self.body, physicsClientId=self.cid)
+        R = np.array(p.getMatrixFromQuaternion(quat)).reshape(3, 3)
+        return dict(pos=np.array(pos), quat=np.array(quat), R=R,
+                    v=np.array(v), w_body=R.T @ np.array(w))
+
+    def reset_pose(self, pos, yaw=0.0, v=(0, 0, 0), w_body=(0, 0, 0), roll=0.0, pitch=0.0):
+        quat = p.getQuaternionFromEuler([roll, pitch, yaw])
+        p.resetBasePositionAndOrientation(self.body, pos, quat, physicsClientId=self.cid)
+        R = np.array(p.getMatrixFromQuaternion(quat)).reshape(3, 3)
+        p.resetBaseVelocity(self.body, v, R @ np.asarray(w_body, float),
+                            physicsClientId=self.cid)
+        self.motors.reset()
+
+    # ---- one physics step of control + actuation -----------------------------
+    def apply_control(self, cmd):
+        """cmd = [vx, vy, vz, yaw_rate]; vx, vy in the heading (yaw-only) frame."""
+        s = self.state()
+        wrench_ref = self.ctrl.compute(s["R"], s["v"], s["w_body"], cmd)
+        thrusts = self.motors.update(P.ALLOCATION_INV @ wrench_ref)
+        wrench = P.ALLOCATION @ thrusts
+        self.last_wrench = wrench
+        R = s["R"]
+        f_world = R @ np.array([0.0, 0.0, wrench[0]]) + self.ext_force
+        t_world = R @ (wrench[1:] + self.ext_torque)
+        # WORLD_FRAME for both: base-link LINK_FRAME torque handling in
+        # PyBullet is unreliable, so rotate ourselves.
+        p.applyExternalForce(self.body, -1, f_world.tolist(), s["pos"].tolist(),
+                             p.WORLD_FRAME, physicsClientId=self.cid)
+        p.applyExternalTorque(self.body, -1, t_world.tolist(), p.WORLD_FRAME,
+                              physicsClientId=self.cid)
+
+
+def make_client(gui=False, egl=False):
+    """egl=True loads the EGL renderer plugin FIRST. PyBullet's EGL renderer
+    only draws bodies created after the plugin is loaded; loading it later
+    gives blank frames (found in V5 Block 3). The camera file arrives in B3."""
+    cid = p.connect(p.GUI if gui else p.DIRECT)
+    if egl:
+        from .camera import load_egl
+        if load_egl(cid) < 0:
+            raise RuntimeError("EGL renderer plugin failed to load")
+    p.setGravity(0, 0, -P.G, physicsClientId=cid)
+    p.setTimeStep(P.PHYSICS_DT, physicsClientId=cid)
+    return cid
