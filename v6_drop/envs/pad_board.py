@@ -32,6 +32,7 @@ from .platform_s1 import PAD_SIZE, PAD_TOP_Z, PlatformS1
 ASSETS = os.path.join(os.path.dirname(__file__), "..", "assets")
 DICT_ID = cv2.aruco.DICT_4X4_50
 TEX_PX = 1536                  # 1.5 m / 1536 px ~ 1 mm per texel; multiple of 4
+MIN_SIDE_PX = 10.0             # px; smaller markers are used only if nothing bigger is seen (C0)
 
 
 @dataclass(frozen=True)
@@ -77,8 +78,14 @@ LAYOUTS = {
     "L70_12": Layout("L70_12", 0.70, (-0.35, 0.0), 0.12, (0.16, 0.32, 0.48, 0.64), (-0.25, 0.0, 0.25)),
     "L60_12": Layout("L60_12", 0.60, (-0.35, 0.0), 0.12, (0.16, 0.32, 0.48, 0.64), (-0.25, 0.0, 0.25)),
     "L70_10": Layout("L70_10", 0.70, (-0.35, 0.0), 0.10, (0.15, 0.29, 0.43, 0.57), (-0.22, 0.0, 0.22)),
+    # C0 (28 Oct, legged drone: camera 0.17-0.25 m above the pad at the drop instead of
+    # 0.27-0.35 m): smaller, denser grids so one marker always fits in the shorter strip.
+    "L70_09": Layout("L70_09", 0.70, (-0.35, 0.0), 0.09,
+                     (0.065, 0.175, 0.285, 0.395, 0.505, 0.615), (-0.22, -0.11, 0.0, 0.11, 0.22)),
+    "L70_08": Layout("L70_08", 0.70, (-0.35, 0.0), 0.08,
+                     (0.06, 0.16, 0.26, 0.36, 0.46, 0.56, 0.66), (-0.25, -0.15, -0.05, 0.05, 0.15, 0.25)),
 }
-DEFAULT_LAYOUT = LAYOUTS["L70_12"]
+DEFAULT_LAYOUT = LAYOUTS["L70_09"]
 
 
 # ---------------------------------------------------------------- texture + mesh
@@ -196,14 +203,21 @@ def measure(img, cam, layout=DEFAULT_LAYOUT, det=None):
     if ids is None:
         return out
     cp = layout.corners_pad()
-    obj, imgp = [], []
+    found = []                                            # (id, 4 x 2 corners, mean side px)
     for c, i in zip(corners, ids.ravel()):
         if int(i) in cp:
-            out.ids.append(int(i))
-            obj.append(cp[int(i)])
-            imgp.append(c.reshape(4, 2))
-    if not obj:
+            c = c.reshape(4, 2)
+            side = np.linalg.norm(c - np.roll(c, 1, axis=0), axis=1).mean()
+            found.append((int(i), c, side))
+    if not found:
         return out
+    # C0: markers only a few pixels wide have noisy corners and spoil the pose of the
+    # good ones. Use only markers >= MIN_SIDE_PX wide; if none is that big, use them all
+    # (a rough pose is better than none).
+    good = [f for f in found if f[2] >= MIN_SIDE_PX] or found
+    out.ids = [f[0] for f in good]
+    obj = [cp[f[0]] for f in good]
+    imgp = [f[1] for f in good]
     obj = np.concatenate(obj).astype(np.float64)
     imgp = np.concatenate(imgp).astype(np.float64)
     ok, rvec, tvec = cv2.solvePnP(obj, imgp, cam.K, None, flags=cv2.SOLVEPNP_IPPE)

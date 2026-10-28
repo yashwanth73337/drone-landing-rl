@@ -1,4 +1,4 @@
-"""LMF2 quadrotor + Lee controller parameters (v6_drop B1; copied unchanged from v5_shin at e17f91e).
+"""LMF2 quadrotor + Lee controller parameters (v6_drop B1, copied from v5_shin at e17f91e; C0 adds the legged-model constants).
 
 Provenance: Shin et al. Table II gains are identical to AerialGym's
 `lmf2_controller_config.py` (github.com/ntnu-arl/aerial_gym_simulator,
@@ -19,8 +19,17 @@ BASE_INERTIA = np.array([0.013, 0.014, 0.013])  # kg m^2, base_link diag
 # Merged inertia = base + 4 point masses at (+-0.1, +-0.1, 0)
 INERTIA = BASE_INERTIA + 4 * PROP_MASS * np.array(
     [PROP_XY**2, PROP_XY**2, 2 * PROP_XY**2])
-COLLISION_BOX = 0.5                            # m, cube edge (base_link collision)
-COLLISION_HALF = COLLISION_BOX / 2             # CoM height above a surface at rest
+COLLISION_BOX = 0.5                            # m, cube edge (V5 base_link collision; NOT used in v6)
+COLLISION_HALF = COLLISION_BOX / 2             # V5 CoM height above a surface at rest (cube)
+# ---- v6 C0: legged collision model (assets/lmf2_legs.urdf), decided 28 Oct --------
+# Body 0.16 x 0.16 x 0.06 m, crossed arms, motors at (+-0.1, +-0.1), four legs under the
+# motors, feet (r 0.012 m) centred 0.14 m below the body centre. Mass/inertia unchanged.
+# PLACEHOLDER sizes until Yashwanth measures the lab drone (motor-to-motor diagonal,
+# landing-gear height, camera height and forward offset).
+FOOT_XY = 0.10                                 # m, feet under the motors at (+-0.1, +-0.1)
+FOOT_Z = -0.14                                 # m, foot centre below the body centre
+FOOT_R = 0.012                                 # m, foot sphere radius
+REST_HEIGHT = -FOOT_Z + FOOT_R                 # 0.152 m: body centre above a surface, standing
 
 # ---- Control allocation (lmf2_config.control_allocator_config) --------------
 # Rows: [Fz, tau_x, tau_y, tau_z]; columns: motors 0..3. The Fx, Fy rows are zero.

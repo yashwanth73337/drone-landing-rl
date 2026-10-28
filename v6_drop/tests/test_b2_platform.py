@@ -20,7 +20,8 @@ from v6_drop.envs.quad import LMF2Quad, make_client
 from v6_drop.envs.platform_s1 import (DRONE_FRICTION, PAD_FRICTION, PAD_SIZE, PAD_TOP_Z,
                                       V_MAX, PlatformS1, set_contact_friction)
 
-REST_Z = PAD_TOP_Z + 0.25 + 0.001    # drone cube centre when resting on the pad top (+1 mm)
+REST_Z = PAD_TOP_Z + P.REST_HEIGHT + 0.001   # drone centre when standing on the pad top (+1 mm)
+# C0 (28 Oct): the drone stands on four feet (REST_HEIGHT 0.152 m), not on V5's 0.5 m cube.
 
 
 def make_world():
@@ -154,7 +155,7 @@ def test_resting_drone_is_carried(v):
         print(f"\n[carry v={v}] slip after 2 s={slip*100:.2f} cm  |v_rel|={vrel:.4f} m/s  "
               f"centre height above pad={height:.4f} m")
         assert slip < 0.02 and vrel < 0.02
-        assert height == pytest.approx(0.25, abs=0.01)       # resting, not sinking or bouncing
+        assert height == pytest.approx(P.REST_HEIGHT, abs=0.01)   # standing, not sinking or bouncing
     finally:
         p.disconnect(cid)
 

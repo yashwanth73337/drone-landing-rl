@@ -9,10 +9,10 @@ detection + one solvePnP, for each candidate layout, in four situations:
   chase      the same starts moved 4 m further back (worst-case gap growth while
              the drone speeds up gently to a 4 m/s pad); counted only when the pad
              centre is still in view.
-  descent    straight line from 4 m behind / 3 m above to the drop point (body
-             centre 0.30 m above the pad centre), 40 points, tilt -10 / 0 / +10 deg.
-  drop       body centre 0.27 / 0.30 / 0.35 m above the pad, tilt -10 / 0 / +10 deg,
-             offsets -0.15 / 0 / +0.15 m along and across: 81 cases.
+  descent    straight line from 4 m behind / 3 m above to the drop point (feet 5 cm
+             above the pad centre), 40 points, tilt -10 / 0 / +10 deg.
+  drop       feet 2 / 5 / 10 cm above the pad (body centre P.REST_HEIGHT + that),
+             tilt -10 / 0 / +10 deg, offsets -0.15 / 0 / +0.15 m along and across: 81 cases.
 
 Columns: detected = at least one layout marker found and a pose computed;
 big / small = which kind was found; err = |estimated - true| pad-centre position
@@ -27,6 +27,7 @@ import time
 import numpy as np
 import pybullet as p
 
+from v6_drop.envs import lmf2_params as P
 from v6_drop.envs import pad_board as PB
 from v6_drop.envs.camera import Camera
 from v6_drop.envs.platform_s1 import PAD_TOP_Z
@@ -121,13 +122,13 @@ def run_layout(layout, renderer, n_starts, seed):
         res["chase"] = [sc.shot(R, pos) for R, pos, vis in ch if vis]
         res["chase_inview"] = np.mean([vis for _, _, vis in ch]) * 100
         desc = []
-        a, b = np.array([-4.0, 0, PAD_TOP_Z + 3.0]), np.array([0.0, 0, PAD_TOP_Z + 0.30])
+        a, b = np.array([-4.0, 0, PAD_TOP_Z + 3.0]), np.array([0.0, 0, PAD_TOP_Z + P.REST_HEIGHT + 0.05])
         for pitch in (-10, 0, 10):
             for f in np.linspace(0, 1, 40):
                 desc.append(sc.shot(euler_R(0, np.radians(pitch), 0), a + f * (b - a)))
         res["descent"] = desc
         drop = []
-        for H in (0.27, 0.30, 0.35):
+        for H in (P.REST_HEIGHT + 0.02, P.REST_HEIGHT + 0.05, P.REST_HEIGHT + 0.10):
             for pitch in (-10, 0, 10):
                 for dx in (-0.15, 0, 0.15):
                     for dy in (-0.15, 0, 0.15):

@@ -132,8 +132,9 @@ def test_ground_is_solid(world):
         p.stepSimulation(physicsClientId=world.cid)
         world.plat.integrate()
     z = world.true_state()["pos"][2]
-    print(f"\n[ground] drone centre height after falling 0.55 m with motors off: {z:.3f} m")
-    assert z == pytest.approx(0.25, abs=0.01)                  # cube half-height on the ground
+    print(f"\n[ground] drone centre height after falling with motors off: {z:.3f} m "
+          f"(standing height {P.REST_HEIGHT:.3f} m)")
+    assert z == pytest.approx(P.REST_HEIGHT, abs=0.01)         # standing on its feet (C0 legs)
 
 
 # ---------------------------------------------------------------- 7. image matches truth

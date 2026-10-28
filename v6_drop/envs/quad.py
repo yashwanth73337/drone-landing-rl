@@ -19,7 +19,10 @@ import pybullet as p
 from . import lmf2_params as P
 from .lee_controller import LeeVelocityController
 
-URDF = os.path.join(os.path.dirname(__file__), "..", "assets", "lmf2.urdf")
+# v6 C0 (28 Oct): the drone touches the world with legs and feet, like a real drone,
+# not with V5/AerialGym's invisible 0.5 m cube. Mass and inertia are unchanged.
+URDF = os.path.join(os.path.dirname(__file__), "..", "assets", "lmf2_legs.urdf")
+URDF_V5_CUBE = os.path.join(os.path.dirname(__file__), "..", "assets", "lmf2.urdf")
 
 
 class MotorModel:
@@ -53,7 +56,7 @@ class LMF2Quad:
     def __init__(self, client, rng, gains):
         self.cid = client
         # URDF_USE_INERTIA_FROM_FILE is essential: without it PyBullet computes
-        # inertia from the 0.5 m collision box (0.052 kg m^2, ~4x too large).
+        # inertia from the collision shapes, not the LMF2 values.
         self.body = p.loadURDF(URDF, [0, 0, 1], flags=p.URDF_USE_INERTIA_FROM_FILE,
                                physicsClientId=client)
         p.changeDynamics(self.body, -1, linearDamping=P.LINEAR_DAMPING,

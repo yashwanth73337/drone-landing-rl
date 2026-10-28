@@ -5,9 +5,10 @@ balls placed at known world points (white background):
   1. intrinsics: 512 x 320, fx = fy = 256 px, 64 deg vertical FOV, axis 60 deg down
   2. the analytic projection (cam.project) matches the rendered image (<= 2 px),
      for level, yawed, rolled and pitched drones
-  3. the Part A numbers: at the drop moment (camera 0.30 m above the pad top),
-     a level drone sees the ground from +0.14 m to +0.71 m ahead of its centre;
-     10 deg nose-down shifts that to +0.09 .. +0.50 m, nose-up to +0.19 .. +1.15 m
+  3. the footprint at the drop moment. C0 (legs): body centre 0.202 m above the pad
+     (standing height 0.152 m + 5 cm). A level drone sees the ground from +0.14 m to
+     +0.53 m ahead of its centre; 10 deg nose-down +0.11 .. +0.37 m; nose-up +0.18 .. +0.85 m.
+     (With V5's cube, 0.30 m: +0.14 .. +0.71, +0.09 .. +0.50, +0.19 .. +1.15 m.)
   4. the point straight below the drone (the pad centre at the drop) is NOT in view
   5. exactly one render per render() call
 
@@ -25,7 +26,9 @@ from v6_drop.envs.camera import Camera
 from v6_drop.envs.platform_s1 import PAD_TOP_Z
 from v6_drop.envs.quad import make_client
 
-DROP_CAM_H = 0.30          # m: 0.25 m (cube half-height) + 5 cm drop height
+from v6_drop.envs import lmf2_params as P
+
+DROP_CAM_H = P.REST_HEIGHT + 0.05   # m: body centre at the drop = standing height + 5 cm (C0 legs)
 
 
 def _egl_ok():
@@ -90,7 +93,7 @@ POSES = {
     "roll10_pitch": ((0.0, 0.0, PAD_TOP_Z + 3.0), 10, -5, 0,
                      [(2.0, 0.0), (3.5, 1.5), (2.5, -1.5)]),
     "drop_moment":  ((0.0, 0.0, PAD_TOP_Z + DROP_CAM_H), 0, 0, 0,
-                     [(0.3, 0.0), (0.5, 0.25), (0.25, -0.15)]),
+                     [(0.25, 0.0), (0.40, 0.12), (0.20, -0.08)]),
 }
 
 
@@ -122,13 +125,12 @@ def test_projection_matches_render(renderer, name):
 
 
 # ---------------------------------------------------------------- 3. Part A footprint
-@pytest.mark.parametrize("pitch_deg,near,far", [(0, 0.14, 0.71), (10, 0.09, 0.50),
-                                                 (-10, 0.19, 1.15)])
+@pytest.mark.parametrize("pitch_deg,near,far", [(0, 0.14, 0.53), (10, 0.11, 0.37),
+                                                 (-10, 0.18, 0.85)])
 def test_drop_moment_footprint(pitch_deg, near, far):
-    """Analytic check of the Part A table. Body pitch +10 = nose-down in PyBullet.
-    The tilted far edges were corrected in B3 (Part A said +0.53 and +1.07): the
-    Part A estimate ignored that the camera sits 0.15 m ahead of the body centre,
-    so tilting also moves the camera down (nose-down) or up (nose-up).
+    """Analytic footprint check (C0 legs, body centre 0.202 m above the pad).
+    Body pitch +10 = nose-down in PyBullet. Tilting also moves the camera (0.15 m
+    ahead of the centre) down or up, which the projection includes.
     The point 'near' m ahead must sit on the BOTTOM image edge, 'far' on the TOP edge
     (centre column), within 0.01 m of ground distance (a few px)."""
     cid = make_client()
