@@ -62,8 +62,12 @@ class LandingEnv(gym.Env):
     metadata = {"render_modes": []}
 
     def __init__(self, renderer="egl", seed=0, gains_mode="random", layout=PB.DEFAULT_LAYOUT,
-                 reward_source="camera"):
+                 reward_source="camera", headless=False):
+        """headless=True (Step 6): no camera image per step (blank image), reward 0 and
+        info['reward_terms'] None. ONLY for fast teacher evaluation; never for training.
+        Episode starts still use the camera (start rule: >= 1 marker detected)."""
         super().__init__()
+        self.headless = bool(headless)
         self.reward_fn = Reward(reward_source)
         self.world = World(renderer=renderer, layout=layout, seed=seed, gains_mode=gains_mode)
         f32 = np.float32
@@ -120,6 +124,11 @@ class LandingEnv(gym.Env):
         self.asked = move * ACT_SCALE
         self.applied = rate_limit(self.applied, self.asked)
         term, trunc, info = self.world.step(self.applied.copy(), drop=drop)
+        if self.headless:
+            obs = self._obs(np.zeros((self.world.cam.h, self.world.cam.w), np.uint8))
+            info.update(applied=self.applied.copy(), asked=self.asked.copy(), drop=drop,
+                        reward_terms=None)
+            return obs, 0.0, term, trunc, info
         img = self.world.render()
         obs = self._obs(img)
         meas = None

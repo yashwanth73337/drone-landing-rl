@@ -172,6 +172,11 @@ class World:
                 R = euler_R(0.0, 0.0, yaw)
                 if not self.pad_centre_in_view(R, pos):
                     continue
+                # Put the drone AT the candidate pose before rendering. Otherwise it still
+                # stands where the last episode ended (often on the pad), its body/shadow
+                # changes the image, and the same seed gives a different start depending
+                # on the previous episode (found in Step 6a, 29 Oct).
+                self.quad.reset_pose(pos.tolist(), yaw=yaw)
                 img = self.cam.render(R, pos)                  # what the drone would see
                 meas = PB.measure(img, self.cam, self.layout, self.det)
                 if meas.ids:                                   # >= 1 pad marker detected

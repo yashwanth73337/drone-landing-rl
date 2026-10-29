@@ -173,3 +173,16 @@ def test_second_egl_world_refused(world):
         W.World(renderer="egl", seed=99)
     t = W.World(renderer="tiny", seed=99)              # TinyRenderer is still allowed
     t.close()
+
+
+# ---------------------------------------------------------------- 10. seed independent of history
+def test_same_seed_after_other_episode(world):
+    """Found in Step 6a: the start check rendered with the drone still where the previous
+    episode ended, so a seed's start depended on the episode before it."""
+    from v6_drop.envs.platform_s1 import PAD_TOP_Z
+    world.reseed(4321)
+    first = world.reset()["spawn"]["pos"].copy()
+    world.reset(pad_speed=1.0, spawn=dict(pos=[0.0, 0.0, PAD_TOP_Z + 0.16], yaw=0.0))  # on the pad
+    world.reseed(4321)
+    again = world.reset()["spawn"]["pos"].copy()
+    assert np.array_equal(first, again)
