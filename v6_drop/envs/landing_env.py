@@ -23,7 +23,8 @@ Action (Dict):
   move   float32 (4,) in [-1, 1]  -> target = move * ACT_SCALE, then rate-limited
   drop   Discrete(2)               1 = cut the motors now (ends the episode, C1 rules)
 
-Reward: 0.0 placeholder. The camera-based reward is Step 5.
+Reward (Step 5, envs/reward.py): camera-based fair progress + visibility and time costs
++ end marks. info["reward_terms"] has the breakdown. reward_source="true" = ablation.
 The applied command at reset = the drone's current heading-frame velocity (clipped to the
 ranges), yaw rate 0, so the controller does not brake hard at the first decision.
 """
@@ -34,6 +35,7 @@ from gymnasium import spaces
 
 from . import pad_board as PB
 from .lee_controller import yaw_rotation
+from .reward import Reward
 from .platform_s1 import V_MAX
 from .world import World
 
@@ -59,8 +61,10 @@ def rate_limit(applied, target, limit=RATE_LIMIT):
 class LandingEnv(gym.Env):
     metadata = {"render_modes": []}
 
-    def __init__(self, renderer="egl", seed=0, gains_mode="random", layout=PB.DEFAULT_LAYOUT):
+    def __init__(self, renderer="egl", seed=0, gains_mode="random", layout=PB.DEFAULT_LAYOUT,
+                 reward_source="camera"):
         super().__init__()
+        self.reward_fn = Reward(reward_source)
         self.world = World(renderer=renderer, layout=layout, seed=seed, gains_mode=gains_mode)
         f32 = np.float32
         self.observation_space = spaces.Dict({
@@ -105,6 +109,7 @@ class LandingEnv(gym.Env):
         v_head = yaw_rotation(yaw).T @ s["v"]
         self.applied = np.clip(np.array([*v_head, 0.0]), -ACT_SCALE, ACT_SCALE)
         self.asked = self.applied.copy()
+        self.reward_fn.reset(out["measurement"], s)
         info = dict(spawn=out["spawn"], tries=out["tries"], pad_speed=self.world.plat.v,
                     start_marker_ids=list(out["measurement"].ids))
         return self._obs(out["image"]), info
@@ -115,7 +120,13 @@ class LandingEnv(gym.Env):
         self.asked = move * ACT_SCALE
         self.applied = rate_limit(self.applied, self.asked)
         term, trunc, info = self.world.step(self.applied.copy(), drop=drop)
-        obs = self._obs(self.world.render())
-        info.update(applied=self.applied.copy(), asked=self.asked.copy(), drop=drop)
-        reward = 0.0                                       # Step 5
+        img = self.world.render()
+        obs = self._obs(img)
+        meas = None
+        if info["outcome"] is None:                        # no camera reward after the end
+            meas = PB.measure(img, self.world.cam, self.world.layout, self.world.det)
+        reward, terms = self.reward_fn.step(meas, self.world.true_state(), info["outcome"],
+                                            info.get("touchdown"))
+        info.update(applied=self.applied.copy(), asked=self.asked.copy(), drop=drop,
+                    reward_terms=terms)
         return obs, reward, term, trunc, info

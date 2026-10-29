@@ -187,8 +187,9 @@ def cam_to_body(cam):
 
 @dataclass
 class PadMeasurement:
-    ids: list = field(default_factory=list)      # layout ids detected in this frame
+    ids: list = field(default_factory=list)      # layout ids used for the pose
     ok: bool = False                             # pose computed
+    confident: bool = False                      # >= 1 used marker is >= MIN_SIDE_PX wide (Step 5)
     p_body: np.ndarray = None                    # pad centre (top) in the BODY frame, m
     R_body_pad: np.ndarray = None                # pad frame -> body frame rotation
     reproj_px: float = np.nan                    # mean corner reprojection error
@@ -214,7 +215,9 @@ def measure(img, cam, layout=DEFAULT_LAYOUT, det=None):
     # C0: markers only a few pixels wide have noisy corners and spoil the pose of the
     # good ones. Use only markers >= MIN_SIDE_PX wide; if none is that big, use them all
     # (a rough pose is better than none).
-    good = [f for f in found if f[2] >= MIN_SIDE_PX] or found
+    good = [f for f in found if f[2] >= MIN_SIDE_PX]
+    out.confident = bool(good)
+    good = good or found
     out.ids = [f[0] for f in good]
     obj = [cp[f[0]] for f in good]
     imgp = [f[1] for f in good]
