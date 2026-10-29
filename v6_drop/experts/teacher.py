@@ -16,7 +16,7 @@ Keeping the student able to follow (the INFORMATION GAP, Step 6 notes):
     pilot could, instead of acting on knowledge the student cannot have yet;
   * pad in view: it approaches along a line K_BACK x height behind the pad, which holds the
     pad ~55 deg below the horizon, the middle of the 60 deg camera's view;
-  * acceleration: the env's 3 m/s^2 rate limit. (Tried gentler, 1.5 m/s^2, and a
+  * acceleration: only the env's 3 m/s^2 rate limit. (Tried gentler, 1.5 m/s^2, and a
     "keep the pad in the picture" acceleration limit with climbing: both were WORSE,
     because the gap to a fast pad grows and the pad drops towards the image top edge.)
 The reward is a potential, so the path does not change the teacher's total progress mark.
@@ -43,7 +43,6 @@ H_DROP = 0.03           # m, feet above the pad top when dropping
 K_BACK = 0.5            # approach line: stay K_BACK x feet height behind the pad centre
 E_DESC0, E_DESC_K = 0.3, 0.3   # descend only within E_DESC0 + E_DESC_K x height of the line
 GO_AROUND_H = 0.3       # m, height to climb to when low and off the line
-A_TEACH = 0.3           # m/s per decision (3 m/s^2) = the env's own rate limit
 K_XY = 0.8              # 1/s, horizontal position gain
 V_REL_MAX = 3.0         # m/s, max speed relative to the pad
 K_I = 0.5               # 1/s^2, integral on the horizontal error when low and close
@@ -126,9 +125,10 @@ class Teacher:
 
         yaw_rate = float(np.clip(K_YAW * wrap(world.plat.psi - yaw), -ACT_SCALE[3], ACT_SCALE[3]))
         cmd = yaw_rotation(yaw).T @ np.array([v_xy[0], v_xy[1], vz])
-        prev = np.asarray(env.applied, float)
-        a_lim = A_TEACH
-        cmd[:2] = prev[:2] + np.clip(cmd[:2] - prev[:2], -a_lim, a_lim)
+        # No teacher-side acceleration limit: the env's rate limit (3 m/s^2) does it.
+        # (A limit relative to env.applied turned noise into DRIFT in Step 6b: with flown =
+        # label + noise, the applied command ratcheted 0.3 m/s per step away and the drone
+        # was "lost" in 26/60 wobble episodes.)
         move = np.clip(np.array([*cmd, yaw_rate]) / ACT_SCALE, -1.0, 1.0)
 
         # drop gate (must hold HOLD_STEPS decisions)

@@ -8,6 +8,10 @@ Two modes (run from the repo root):
                                                 own camera with detected markers drawn
         v6_drop/results/teacher/ep_<seed>.png   top view + side view + time plots
 
+  3. One video per TROUBLE kind (Step 6b), on the training episode record_demos records:
+       python -m v6_drop.scripts.show_teacher troubles
+     -> v6_drop/results/teacher/trouble_<kind>_<seed>.mp4/.png  (red "TROUBLE: ..." text)
+
   2. Many episodes without pictures (fast) -> success table + all paths in one figure:
        python -m v6_drop.scripts.show_teacher batch --n 500
      -> v6_drop/results/teacher/batch.csv, batch_summary.txt, batch_paths.png
@@ -39,17 +43,29 @@ GREEN, RED, WHITE, YELLOW = (60, 200, 60), (60, 60, 230), (255, 255, 255), (0, 2
 
 
 # ---------------------------------------------------------------- one episode
-def run_episode(env, teacher, seed, frames=False):
-    """Fly one episode with the teacher. Returns (log list, final info, frames list)."""
+def run_episode(env, teacher, seed, frames=False, trouble=None):
+    """Fly one episode with the teacher. trouble: None or a troubles.KINDS name (Step 6b;
+    the trouble's random numbers come from the seed, as in record_demos).
+    Returns (log list, final info, reset info, frames list)."""
     obs, info0 = env.reset(seed=seed)
     teacher.reset()
-    log, pics = [], []
+    tr_maker = None
+    if trouble is not None:
+        from v6_drop.experts.troubles import Troubles, pick_kind
+        rng = np.random.default_rng(seed)
+        pick_kind(rng)                         # same draw order as record_demos
+        tr_maker = Troubles()
+        tr_maker.reset(trouble, rng)
+    log, pics, seen = [], [], True
     while True:
         s = env.world.true_state()
         act, ti = teacher.act(env)
+        flag = ""
+        if tr_maker is not None:
+            act, flag = tr_maker.apply(env, act, seen)
         rec = dict(t=env.world.t * P.POLICY_DT, pos=s["pos"].copy(), pad=s["pad_center"].copy(),
                    rel_pad=env.world.plat.world_to_pad([s["pos"]])[0],
-                   hf=ti["hf"], d=ti["d"], phase=ti["phase"],
+                   hf=ti["hf"], d=ti["d"], phase=ti["phase"], flag=flag,
                    vrel=float(np.linalg.norm((s["v"] - s["pad_v"])[:2])),
                    tilt=float(np.degrees(np.arccos(np.clip(s["R"][2, 2], -1, 1)))))
         if frames:
@@ -57,6 +73,8 @@ def run_episode(env, teacher, seed, frames=False):
         obs, r, term, trunc, info = env.step(act)
         rt = info.get("reward_terms") or {}
         rec["seen"] = rt.get("seen")
+        if rt.get("seen") is not None:
+            seen = bool(rt["seen"])
         log.append(rec)
         if term or trunc:
             break
@@ -109,6 +127,8 @@ def compose_frame(env, rec, outcome):
     put(left, f"t = {rec['t']:4.1f} s   phase: {rec['phase']}", 20, YELLOW)
     put(left, f"feet above pad {rec['hf']:5.2f} m   to centre {rec['d']:5.2f} m", 42)
     put(left, f"pad {env.world.plat.v:3.1f} m/s   rel. speed {rec['vrel']:4.2f} m/s   tilt {rec['tilt']:4.1f} deg", 64)
+    if rec.get("flag"):
+        put(left, f"TROUBLE: {rec['flag']}", CHASE_H - 14, RED, 0.7)
     put(right, f"drone camera   markers seen: {n_ids}", 20, GREEN if n_ids else RED)
     if outcome is not None:
         o = outcome["outcome"]
@@ -136,7 +156,7 @@ def write_video(frames, path_mp4):
             os.replace(h264, path_mp4)
 
 
-def plot_episode(log, info, seed, pad_speed, path_png):
+def plot_episode(log, info, seed, pad_speed, path_png, title="Teacher"):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -181,7 +201,11 @@ def plot_episode(log, info, seed, pad_speed, path_png):
     ax[2].legend(fontsize=8)
     td = info.get("touchdown") or {}
     imp = f", impact {td['impact']:.2f} m/s" if td.get("impact") is not None else ""
-    fig.suptitle(f"Teacher, seed {seed}, pad {pad_speed:.1f} m/s: {info['outcome']}{imp}")
+    fl = [ti for ti, r in zip([r["t"] for r in log], log) if r.get("flag")]
+    if fl:
+        ax[2].plot(fl, np.zeros(len(fl)) - 0.3, "m|", ms=8, label="trouble active")
+        ax[2].legend(fontsize=8)
+    fig.suptitle(f"{title}, seed {seed}, pad {pad_speed:.1f} m/s: {info['outcome']}{imp}")
     fig.tight_layout()
     fig.savefig(path_png, dpi=110)
     plt.close(fig)
@@ -203,6 +227,30 @@ def mode_videos(seeds):
             print(f"[video] seed {seed}: pad {info0['pad_speed']:.2f} m/s, {info['outcome']}, "
                   f"{len(log) * P.POLICY_DT:.1f} s, impact {td.get('impact', float('nan')):.2f} m/s "
                   f"-> {base}.mp4/.png ({time.time() - t0:.0f} s)", flush=True)
+    finally:
+        env.close()
+
+
+def mode_troubles(kinds):
+    """One video + plot per trouble kind, on the first TRAINING attempt of that kind
+    (seed 100000 + e, the same episode record_demos records)."""
+    from v6_drop.experts.troubles import pick_kind
+    os.makedirs(OUT, exist_ok=True)
+    env = E.LandingEnv(renderer="egl", seed=0)
+    teacher = Teacher()
+    try:
+        for kind in kinds:
+            e = next(e for e in range(10000) if pick_kind(np.random.default_rng(100000 + e)) == kind)
+            seed = 100000 + e
+            t0 = time.time()
+            log, info, info0, frames = run_episode(env, teacher, seed, frames=True, trouble=kind)
+            base = os.path.join(OUT, f"trouble_{kind}_{seed}")
+            write_video(frames, base + ".mp4")
+            plot_episode(log, info, seed, info0["pad_speed"], base + ".png", title=f"Teacher with trouble '{kind}'")
+            ga = any(r["phase"] == "go-around" for r in log)
+            print(f"[trouble] {kind}: seed {seed}, pad {info0['pad_speed']:.2f} m/s, {info['outcome']}, "
+                  f"{len(log) * P.POLICY_DT:.1f} s, trouble steps {sum(bool(r['flag']) for r in log)}, "
+                  f"go-around {ga} -> {base}.mp4/.png ({time.time() - t0:.0f} s)", flush=True)
     finally:
         env.close()
 
@@ -282,9 +330,13 @@ def main():
     v.add_argument("--seeds", type=int, nargs="+", default=[9000, 9001, 9002, 9003])
     b = sub.add_parser("batch")
     b.add_argument("--n", type=int, default=500)
+    t = sub.add_parser("troubles")
+    t.add_argument("--kinds", nargs="+", default=["wobble", "gust", "pad_lost", "bad_approach"])
     a = ap.parse_args()
     if a.mode == "videos":
         mode_videos(a.seeds)
+    elif a.mode == "troubles":
+        mode_troubles(a.kinds)
     else:
         mode_batch(a.n)
 
