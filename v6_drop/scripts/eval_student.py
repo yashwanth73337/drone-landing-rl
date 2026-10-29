@@ -37,9 +37,14 @@ def load(ckpt, device):
     return m, ck
 
 
-def fly(env, model, seed, device, frames=False):
+def fly(env, model, seed, device, frames=False, drop_rule=None):
+    """One exam flight. drop_rule (6d diagnostic, scripts/oracle_drop.py): an object with
+    reset() and __call__(rec) -> bool that may FORCE a drop from the true state; None = the
+    student alone (the real exam)."""
     obs, info0 = env.reset(seed=seed)
     hc, log, pics = None, [], []
+    if drop_rule is not None:
+        drop_rule.reset()
     while True:
         s = env.world.true_state()
         act, hc, p_drop = model.act(obs, hc, device)
@@ -51,6 +56,9 @@ def fly(env, model, seed, device, frames=False):
                    vrel=float(np.linalg.norm((s["v"] - s["pad_v"])[:2])),
                    vz_rel=float((s["v"] - s["pad_v"])[2]),
                    tilt=float(np.degrees(np.arccos(np.clip(s["R"][2, 2], -1, 1)))))
+        if drop_rule is not None and drop_rule(rec):
+            act = dict(act, drop=1)
+            rec["forced_drop"] = True
         if frames:
             pics.append(ST.compose_frame(env, rec, outcome=None))
         obs, r, term, trunc, info = env.step(act)

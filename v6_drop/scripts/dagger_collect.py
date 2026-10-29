@@ -9,6 +9,8 @@ Decided 29 Oct:
   D1 pure DAgger: the student flies the WHOLE flight; the teacher never takes the controls
   D2 after each round: continue training from the last student, 8 epochs, all data
   D3 no troubles: the student's own mistakes are the troubles now
+  (30 Oct) --drop-gate: the drop rule the teacher LABELS with; round 4 onwards: safe30m
+           (experts/drop_gates.py). Rounds 1-3 used the original 'teacher' gate.
   ALL flights are kept (failures too: their states are exactly what we need)
   Flights: training seeds only. Round r, flight i: episode id r x 10000 + i,
            seed 200000 + id (round 1 -> seeds 210000..; never the test seeds 9000..)
@@ -101,7 +103,7 @@ def fly_dagger(env, model, teacher, ep, device="cpu"):
     return rec, row
 
 
-def worker(w, n_workers, rnd, flights, ckpt, out, renderer, q):
+def worker(w, n_workers, rnd, flights, ckpt, out, renderer, q, drop_gate="teacher"):
     import torch
     torch.set_num_threads(1)
     from v6_drop.envs import landing_env as E
@@ -109,7 +111,7 @@ def worker(w, n_workers, rnd, flights, ckpt, out, renderer, q):
     from v6_drop.scripts.eval_student import load
     model, _ = load(ckpt, "cpu")
     env = E.LandingEnv(renderer=renderer, seed=0)
-    teacher = Teacher()
+    teacher = Teacher(gate=drop_gate)
     buf = {k: [] for k in KEYS}
     n_buf, chunk, rows, t0 = 0, 0, [], time.time()
     mine = [i for i in range(flights) if i % n_workers == w]
@@ -136,7 +138,7 @@ def worker(w, n_workers, rnd, flights, ckpt, out, renderer, q):
     q.put(rows)
 
 
-def summarize(rows, out, ckpt, rnd):
+def summarize(rows, out, ckpt, rnd, drop_gate="teacher"):
     rows = sorted(rows, key=lambda r: r["ep"])
     with open(os.path.join(out, "flights.csv"), "w", newline="") as f:
         wr = csv.DictWriter(f, fieldnames=list(rows[0]))
@@ -149,7 +151,7 @@ def summarize(rows, out, ckpt, rnd):
     safe = [r for r in rows if r["outcome"] == "success"]
     steps = sum(r["steps"] for r in rows)
     lines = [f"DAgger round {rnd}: student {os.path.abspath(ckpt)} flew {n} flights "
-             f"(seeds {rows[0]['seed']}..{rows[-1]['seed']}), all kept",
+             f"(seeds {rows[0]['seed']}..{rows[-1]['seed']}), all kept; teacher drop gate '{drop_gate}'",
              f"samples {steps:,} (mean {steps / n:.0f} per flight)",
              f"student safe {len(safe)}/{n} = {100 * len(safe) / n:.1f}% "
              f"(by drop {sum(r['reason'] == 'drop' for r in safe)}, by auto-cut "
@@ -177,6 +179,7 @@ def main():
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--renderer", choices=["egl", "tiny"], default="egl")
     ap.add_argument("--out", default=None, help="default results/dagger/r<round>")
+    ap.add_argument("--drop-gate", default="teacher", help="teacher's drop rule (30 Oct: safe30m from round 4)")
     a = ap.parse_args()
     assert a.round >= 1
     out = a.out or os.path.join(OUT, f"r{a.round}")
@@ -186,7 +189,8 @@ def main():
     ctx = mp.get_context("spawn")
     q = ctx.Queue()
     t0 = time.time()
-    procs = [ctx.Process(target=worker, args=(w, a.workers, a.round, a.flights, a.ckpt, out, a.renderer, q))
+    procs = [ctx.Process(target=worker, args=(w, a.workers, a.round, a.flights, a.ckpt, out, a.renderer, q,
+                                              a.drop_gate))
              for w in range(a.workers)]
     for pr in procs:
         pr.start()
@@ -196,7 +200,7 @@ def main():
     for pr in procs:
         pr.join()
     print(f"[dag] round {a.round}: {len(rows)} flights in {(time.time() - t0) / 60:.1f} min", flush=True)
-    summarize(rows, out, a.ckpt, a.round)
+    summarize(rows, out, a.ckpt, a.round, a.drop_gate)
 
 
 if __name__ == "__main__":

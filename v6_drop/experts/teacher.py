@@ -34,6 +34,7 @@ Tuning history (29 Oct, all in Claude's sandbox, headless):
 """
 import numpy as np
 
+from . import drop_gates as G
 from ..envs import lmf2_params as P
 from ..envs.landing_env import ACT_SCALE
 from ..envs.lee_controller import yaw_rotation
@@ -58,7 +59,8 @@ VZ_LIFT = 0.25          # m/s
 T_BRAKE = 2.2           # s, descent limit = (height - H_DROP) / T_BRAKE
 K_YAW = 1.5             # 1/s, turn to face the pad's travel direction
 PAD_V_TAU = 0.5         # s, how fast the teacher "learns" the pad velocity
-# drop gate
+# drop gate: the original 'teacher' gate; the same numbers live in drop_gates.GATES['teacher']
+# (a test checks they agree). Teacher(gate=...) picks the rule actually used.
 D_DROP = 0.06           # m, horizontal distance to the pad centre
 DH_DROP = 0.010         # m, |feet height - H_DROP| (drop between 2 and 4 cm)
 V_REL_DROP = 0.10       # m/s, horizontal and vertical relative speed
@@ -71,7 +73,13 @@ def wrap(a):
 
 
 class Teacher:
-    def __init__(self):
+    def __init__(self, gate="teacher"):
+        """gate: which drop rule decides (and labels) the drop (experts/drop_gates.py).
+        'teacher' = the original 6a gate (the default; the demos were recorded with it).
+        'safe30m' = the wider safe gate decided 30 Oct (DAgger round 4 onwards).
+        The gate changes ONLY the drop decision, never the move."""
+        self.gate_name = gate
+        self.gate_cfg = G.GATES[gate]
         self.reset()
 
     def reset(self):
@@ -131,13 +139,11 @@ class Teacher:
         # was "lost" in 26/60 wobble episodes.)
         move = np.clip(np.array([*cmd, yaw_rate]) / ACT_SCALE, -1.0, 1.0)
 
-        # drop gate (must hold HOLD_STEPS decisions)
+        # drop gate (must hold for the gate's 'hold' decisions); see drop_gates.py
         vrel = v - s["pad_v"]
-        ok = (d < D_DROP and abs(hf - H_DROP) < DH_DROP
-              and np.hypot(vrel[0], vrel[1]) < V_REL_DROP and abs(vrel[2]) < V_REL_DROP
-              and tilt < TILT_DROP)
+        ok = bool(G.ok(self.gate_cfg, d=d, hf=hf, vxy=np.hypot(vrel[0], vrel[1]), vz=vrel[2], tilt=tilt))
         self.gate = self.gate + 1 if ok else 0
-        drop = int(self.gate >= HOLD_STEPS)
+        drop = int(self.gate >= self.gate_cfg["hold"])
         if drop:
             phase = "drop"
         self.phase = phase

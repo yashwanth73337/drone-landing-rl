@@ -95,7 +95,10 @@ class Demos:
     Step 6d: the list is [bc_data, dagger_data/r1, dagger_data/r2, ...]. Episode ids must
     be unique across the parts (demos 0..; DAgger round r: r x 10000 + i)."""
 
-    def __init__(self, paths):
+    def __init__(self, paths, drop_gate=None):
+        """drop_gate (6d, decided 30 Oct): None = drop labels as recorded; a gate name from
+        experts/drop_gates.py (e.g. 'safe30m') = RECOMPUTE every drop label from the saved
+        true state ('priv' + quaternion): 1 where the gate holds. Move labels never change."""
         if isinstance(paths, (str, os.PathLike)):
             paths = [paths]
         self.paths = [str(p) for p in paths]
@@ -118,6 +121,10 @@ class Demos:
         assert len(np.unique(self.ep)) == len(self.ep), "episode ids repeat across the parts"
         self.part_sizes = [(p, len(im), len(e)) for p, im, e in zip(self.paths, imgs, ep)]
         self.val = (self.ep % 10) == 0
+        self.drop_gate = drop_gate
+        self.drop_recorded = int(self.a["drop"].sum())
+        if drop_gate is not None:
+            self.a["drop"] = relabel_drop(self.a["priv"], self.a["state"], self.start, self.length, drop_gate)
 
     def episodes(self, split):
         keep = self.val if split == "val" else ~self.val
@@ -156,6 +163,19 @@ class Demos:
             pairs += [(e, s) for s in range(o - CLIP, n, CLIP) if s + CLIP > 0]
         idx = rng.permutation(len(pairs))
         return [pairs[i] for i in idx]
+
+
+def relabel_drop(priv, state, start, length, gate):
+    """Drop labels from the saved true state with a gate (experts/drop_gates.py)."""
+    from v6_drop.experts import drop_gates as G
+    from v6_drop.scripts.drop_gap import gate_numbers
+    g = gate_numbers(priv, state)
+    flags = G.ok(gate, g["d"], g["hf"], g["vxy"], g["vz"], g["tilt"])
+    hold = G.GATES[gate]["hold"]
+    out = np.zeros(len(flags), np.uint8)
+    for s0, n in zip(start, length):
+        out[s0:s0 + n] = G.held(flags[s0:s0 + n], hold) if hold > 1 else flags[s0:s0 + n]
+    return out
 
 
 def batch(demos, pairs):

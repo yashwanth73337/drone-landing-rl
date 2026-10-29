@@ -18,6 +18,9 @@ share of the steps. --low-weight W makes every step with feet below LOW_H (0.3 m
 'priv', training only) count W times in the move loss (normalised by the total weight).
 W = 1 (default) is exactly the old loss. The log always shows the move error on low steps
 ("low vz" in m/s), whatever W is.
+Step 6d, wider drop rule (decided 30 Oct): --drop-gate safe30m recomputes EVERY drop label of
+all the data from the saved true state with the safe30m gate (experts/drop_gates.py); the
+move labels do not change. The first lines show the drop-label count before and after.
 
 Run (from the repo root; performance mode first):
   nohup python -m v6_drop.scripts.train_bc --name bc256 > v6_drop/results/bc256.log 2>&1 &
@@ -126,6 +129,8 @@ def main():
     ap.add_argument("--data", nargs="+", default=[os.path.join(RESULTS, "bc_data")],
                     help="one or more built dataset folders (6d: demos + DAgger rounds)")
     ap.add_argument("--init", default=None, help="continue from this checkpoint (6d)")
+    ap.add_argument("--drop-gate", default=None,
+                    help="recompute all drop labels with this gate (6d: safe30m); default: as recorded")
     ap.add_argument("--low-weight", type=float, default=1.0,
                     help=f"weight of steps with feet below {LOW_H} m in the move loss (1 = off)")
     ap.add_argument("--epochs", type=int, default=20)
@@ -141,7 +146,7 @@ def main():
     os.makedirs(out, exist_ok=True)
     torch.manual_seed(a.seed)
     rng = np.random.default_rng(a.seed)
-    demos = Demos(a.data)
+    demos = Demos(a.data, drop_gate=a.drop_gate)
     if a.max_clips:
         full = demos.clip_starts
         demos.clip_starts = lambda split, r: full(split, r)[:a.max_clips]
@@ -153,6 +158,7 @@ def main():
     opt = torch.optim.Adam(model.parameters(), lr=a.lr)
     amp = (not a.no_amp) and a.device.startswith("cuda")
     cfg = dict(vars(a), n_params=n_params(model), amp=amp, drop_weight=DROP_WEIGHT, low_h=LOW_H,
+               drop_labels=int(demos.a["drop"].sum()), drop_labels_recorded=demos.drop_recorded,
                train_episodes=int(len(demos.episodes("train"))), val_episodes=int(len(demos.episodes("val"))),
                parts=[dict(path=os.path.abspath(p), samples=n, episodes=m) for p, n, m in demos.part_sizes])
     json.dump(cfg, open(os.path.join(out, "config.json"), "w"), indent=1)
@@ -161,6 +167,11 @@ def main():
           + (f", start from {a.init}" if a.init else ""), flush=True)
     for p, n, m in demos.part_sizes:
         print(f"[bc]   data {p}: {n:,} samples, {m} episodes", flush=True)
+    n_drop = int(demos.a["drop"].sum())
+    print(f"[bc]   drop labels: {n_drop:,} ({100 * n_drop / len(demos.a['drop']):.2f}% of steps) in "
+          f"{len({int(e) for e in demos.a['ep'][demos.a['drop'] > 0]})} episodes"
+          + (f"; recomputed with gate '{a.drop_gate}' (recorded: {demos.drop_recorded:,})" if a.drop_gate else ""),
+          flush=True)
     best = float("inf")
     log_path = os.path.join(out, "log.csv")
     for ep in range(1, a.epochs + 1):
