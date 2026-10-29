@@ -152,5 +152,5 @@ def test_exam_runs(tmp_path, monkeypatch):
     monkeypatch.setattr(ES.E, "LandingEnv", lambda renderer, seed: original("tiny", seed))
     m, _ = ES.load(str(ck), "cpu")
     ES.exam(m, str(ck), 2, "cpu")
-    for f in ("exam_2.csv", "exam_2_summary.txt", "exam_paths.png"):
+    for f in ("s_exam_2.csv", "s_exam_2_summary.txt", "s_exam_paths.png"):
         assert os.path.exists(tmp_path / f)

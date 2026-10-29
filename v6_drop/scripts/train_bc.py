@@ -12,6 +12,12 @@ Saves runs/<name>/best.pt (lowest validation loss), last.pt, log.csv, config.jso
 
 Step 6d (DAgger, decided 29 Oct): --data takes several built folders (old demos + DAgger
 rounds) and --init continues from an earlier student (8 epochs per round, D2).
+Step 6d, low weighting (proposed 29 Oct after drop_gap.py): the student never STOPS at 3 cm
+(sinks 0.17 m/s through the drop window; the teacher 0.01) and the final metres are a tiny
+share of the steps. --low-weight W makes every step with feet below LOW_H (0.3 m, read from
+'priv', training only) count W times in the move loss (normalised by the total weight).
+W = 1 (default) is exactly the old loss. The log always shows the move error on low steps
+("low vz" in m/s), whatever W is.
 
 Run (from the repo root; performance mode first):
   nohup python -m v6_drop.scripts.train_bc --name bc256 > v6_drop/results/bc256.log 2>&1 &
@@ -32,31 +38,43 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from v6_drop.envs.landing_env import ACT_SCALE
+from v6_drop.envs import lmf2_params as P
+from v6_drop.envs.landing_env import ACT_SCALE, PRIV_SCALE
 from v6_drop.learn.dataset import Demos, batch
 from v6_drop.learn.student import Student, n_params
 
 RESULTS = os.path.join(os.path.dirname(__file__), "..", "results")
 DROP_WEIGHT = 20.0
 DROP_COEF = 1.0
+LOW_H = 0.3                    # m, feet height below which a step is "low" (final phase)
 
 
 def to_t(b, device):
     return {k: torch.as_tensor(v, device=device) for k, v in b.items()}
 
 
-def losses(model, b, amp, device):
+def feet_height(priv):
+    """Feet height above the pad top [m] from the critic's 'priv' (last entry: drone centre
+    height above the pad top / PRIV_SCALE[7])."""
+    return priv[..., 7] * float(PRIV_SCALE[7]) - P.REST_HEIGHT
+
+
+def losses(model, b, amp, device, low_weight=1.0):
     with torch.autocast(device_type=device.split(":")[0], dtype=torch.bfloat16, enabled=amp):
         move, logit, _, _ = model(b["image"], b["state"].float())
     move, logit = move.float(), logit.float()
     m = b["mask"]
     n = m.sum().clamp(min=1.0)
-    l_move = (((move - b["move"]) ** 2).mean(-1) * m).sum() / n
+    low = (feet_height(b["priv"].float()) < LOW_H).float() * m
+    wm = m + (low_weight - 1.0) * low                     # = m when low_weight == 1
+    l_move = (((move - b["move"]) ** 2).mean(-1) * wm).sum() / wm.sum().clamp(min=1.0)
     y = b["drop"].float()
     w = torch.where(y > 0.5, torch.full_like(y, DROP_WEIGHT), torch.ones_like(y))
     l_drop = (F.binary_cross_entropy_with_logits(logit, y, reduction="none") * w * m).sum() / n
     stats = dict(move_abs=((move - b["move"]).abs() * m.unsqueeze(-1)).sum((0, 1)).detach(),
                  n=n.detach(), drops=(y * m).sum().detach(),
+                 move_abs_low=((move - b["move"]).abs() * low.unsqueeze(-1)).sum((0, 1)).detach(),
+                 n_low=low.sum().detach(),
                  drops_hit=(((logit > 0) & (y > 0.5)).float() * m).sum().detach(),
                  nondrop=((1 - y) * m).sum().detach(),
                  false_drop=(((logit > 0) & (y < 0.5)).float() * m).sum().detach())
@@ -66,14 +84,18 @@ def losses(model, b, amp, device):
 def summarize(acc):
     acc = {k: v.detach().cpu() for k, v in acc.items()}   # GPU sums -> CPU (fixed 29 Oct:
     n = acc["n"]                                           # mixing cuda and cpu tensors crashed)
-    mae = (acc["move_abs"] / n) * torch.as_tensor(ACT_SCALE, dtype=torch.float32)
+    scale = torch.as_tensor(ACT_SCALE, dtype=torch.float32)
+    mae = (acc["move_abs"] / n) * scale
+    mae_low = (acc["move_abs_low"] / acc["n_low"].clamp(min=1)) * scale
     return dict(move_mae_vx=mae[0].item(), move_mae_vy=mae[1].item(), move_mae_vz=mae[2].item(),
                 move_mae_yaw_deg=float(np.degrees(mae[3].item())),
+                low_mae_vx=mae_low[0].item(), low_mae_vz=mae_low[2].item(),
+                low_share=(acc["n_low"] / n).item(),
                 drop_recall=(acc["drops_hit"] / acc["drops"].clamp(min=1)).item(),
                 false_drop=(acc["false_drop"] / acc["nondrop"].clamp(min=1)).item())
 
 
-def run_epoch(model, demos, split, rng, bs, device, amp, opt=None):
+def run_epoch(model, demos, split, rng, bs, device, amp, opt=None, low_weight=1.0):
     pairs = demos.clip_starts(split, rng)
     tot = dict(move=0.0, drop=0.0, n=0)
     acc = None
@@ -81,7 +103,7 @@ def run_epoch(model, demos, split, rng, bs, device, amp, opt=None):
     for i in range(0, len(pairs), bs):
         b = to_t(batch(demos, pairs[i:i + bs]), device)
         with torch.set_grad_enabled(opt is not None):
-            l_move, l_drop, st = losses(model, b, amp, device)
+            l_move, l_drop, st = losses(model, b, amp, device, low_weight)
             loss = l_move + DROP_COEF * l_drop
             if opt is not None:
                 opt.zero_grad(set_to_none=True)
@@ -104,6 +126,8 @@ def main():
     ap.add_argument("--data", nargs="+", default=[os.path.join(RESULTS, "bc_data")],
                     help="one or more built dataset folders (6d: demos + DAgger rounds)")
     ap.add_argument("--init", default=None, help="continue from this checkpoint (6d)")
+    ap.add_argument("--low-weight", type=float, default=1.0,
+                    help=f"weight of steps with feet below {LOW_H} m in the move loss (1 = off)")
     ap.add_argument("--epochs", type=int, default=20)
     ap.add_argument("--batch", type=int, default=16, help="clips per batch")
     ap.add_argument("--lr", type=float, default=3e-4)
@@ -128,7 +152,7 @@ def main():
         model.load_state_dict(ck0["model"])
     opt = torch.optim.Adam(model.parameters(), lr=a.lr)
     amp = (not a.no_amp) and a.device.startswith("cuda")
-    cfg = dict(vars(a), n_params=n_params(model), amp=amp, drop_weight=DROP_WEIGHT,
+    cfg = dict(vars(a), n_params=n_params(model), amp=amp, drop_weight=DROP_WEIGHT, low_h=LOW_H,
                train_episodes=int(len(demos.episodes("train"))), val_episodes=int(len(demos.episodes("val"))),
                parts=[dict(path=os.path.abspath(p), samples=n, episodes=m) for p, n, m in demos.part_sizes])
     json.dump(cfg, open(os.path.join(out, "config.json"), "w"), indent=1)
@@ -141,8 +165,9 @@ def main():
     log_path = os.path.join(out, "log.csv")
     for ep in range(1, a.epochs + 1):
         t0 = time.time()
-        tr = run_epoch(model, demos, "train", rng, a.batch, a.device, amp, opt)
-        va = run_epoch(model, demos, "val", np.random.default_rng(12345), a.batch, a.device, amp)
+        tr = run_epoch(model, demos, "train", rng, a.batch, a.device, amp, opt, a.low_weight)
+        va = run_epoch(model, demos, "val", np.random.default_rng(12345), a.batch, a.device, amp,
+                       low_weight=a.low_weight)
         val_loss = va["loss_move"] + DROP_COEF * va["loss_drop"]
         row = dict(epoch=ep, sec=round(time.time() - t0, 1),
                    **{f"train_{k}": round(v, 5) for k, v in tr.items()},
@@ -163,7 +188,8 @@ def main():
         print(f"[bc] epoch {ep:2d}/{a.epochs} {row['sec']:5.0f} s | train move {tr['loss_move']:.4f} "
               f"drop {tr['loss_drop']:.4f} | val move {va['loss_move']:.4f} drop {va['loss_drop']:.4f} | "
               f"val MAE vx {va['move_mae_vx']:.2f} vy {va['move_mae_vy']:.2f} vz {va['move_mae_vz']:.2f} m/s "
-              f"| val drop recall {100 * va['drop_recall']:.0f}% false {100 * va['false_drop']:.2f}%{tag}",
+              f"| low vx {va['low_mae_vx']:.2f} vz {va['low_mae_vz']:.2f} ({100 * va['low_share']:.0f}% of steps) "
+          f"| val drop recall {100 * va['drop_recall']:.0f}% false {100 * va['false_drop']:.2f}%{tag}",
               flush=True)
     print(f"[bc] done; best val loss {best:.4f} -> {os.path.abspath(out)}/best.pt", flush=True)
 

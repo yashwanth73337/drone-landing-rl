@@ -7,6 +7,11 @@ Run (from the repo root; performance mode first):
   python -m v6_drop.scripts.eval_student --ckpt ... --videos 9000 9001 9002 9003
 Output: v6_drop/results/runs/<run>/exam_<n>.csv, exam_<n>_summary.txt, exam_paths.png and
         (with --videos) student_<seed>.mp4/.png. It prints nothing until each 10 episodes.
+        (6d) Files of last.pt are named exam_<n>*, of any other checkpoint <stem>_exam_<n>*,
+        so exams of best.pt and last.pt no longer overwrite each other.
+Drop-gate lines (6d, 29 Oct): per flight, the longest run of steps meeting the teacher's
+drop gate (true state, teacher's constants), and the longest stay in the 2-4 cm window
+with the sinking speed there. These show progress towards DROPPING before drops happen.
 """
 import argparse
 import csv
@@ -19,6 +24,7 @@ import torch
 from v6_drop.envs import landing_env as E
 from v6_drop.envs import lmf2_params as P
 from v6_drop.envs.platform_s1 import PAD_TOP_Z
+from v6_drop.experts import teacher as T
 from v6_drop.learn.student import Student
 from v6_drop.scripts import show_teacher as ST
 
@@ -43,6 +49,7 @@ def fly(env, model, seed, device, frames=False):
                    hf=float(s["pos"][2] - PAD_TOP_Z - P.REST_HEIGHT), d=float(np.hypot(rel[0], rel[1])),
                    phase=f"student (drop chance {100 * p_drop:.0f}%)", flag="",
                    vrel=float(np.linalg.norm((s["v"] - s["pad_v"])[:2])),
+                   vz_rel=float((s["v"] - s["pad_v"])[2]),
                    tilt=float(np.degrees(np.arccos(np.clip(s["R"][2, 2], -1, 1)))))
         if frames:
             pics.append(ST.compose_frame(env, rec, outcome=None))
@@ -58,6 +65,25 @@ def fly(env, model, seed, device, frames=False):
     return log, info, info0, pics
 
 
+def runs(flags):
+    """Longest run of True in a sequence."""
+    best = cur = 0
+    for f in flags:
+        cur = cur + 1 if f else 0
+        best = max(best, cur)
+    return best
+
+
+def gate_stats(log):
+    """Longest run meeting the teacher's drop gate, longest stay in the 2-4 cm window, and
+    the mean sinking speed while in the window (None if never there)."""
+    ok = [(r["d"] < T.D_DROP and abs(r["hf"] - T.H_DROP) < T.DH_DROP and r["vrel"] < T.V_REL_DROP
+           and abs(r["vz_rel"]) < T.V_REL_DROP and r["tilt"] < np.degrees(T.TILT_DROP)) for r in log]
+    win = [abs(r["hf"] - T.H_DROP) < T.DH_DROP for r in log]
+    sink = [-r["vz_rel"] for r, w in zip(log, win) if w]
+    return runs(ok), runs(win), (float(np.mean(sink)) if sink else None)
+
+
 def wilson(k, n, z=1.96):
     c = (k + z * z / 2) / (n + z * z)
     hw = z * np.sqrt(k * (n - k) / n + z * z / 4) / (n + z * z)
@@ -69,6 +95,8 @@ def exam(model, ckpt, n, device, seed0=9000):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     out = os.path.dirname(os.path.abspath(ckpt))
+    stem = os.path.splitext(os.path.basename(ckpt))[0]
+    pre = "" if stem == "last" else stem + "_"
     env = E.LandingEnv(renderer="egl", seed=0)
     rows, paths, t0 = [], [], time.time()
     try:
@@ -79,6 +107,9 @@ def exam(model, ckpt, n, device, seed0=9000):
                              time_s=round(len(log) * P.POLICY_DT, 1), reason=td.get("reason"),
                              impact=None if td.get("impact") is None else round(td["impact"], 3),
                              offset_cm=None if not td.get("land_xy") else round(100 * float(np.linalg.norm(td["land_xy"])), 1)))
+            g_run, w_stay, w_sink = gate_stats(log)
+            rows[-1].update(gate_run=g_run, window_stay=w_stay,
+                            window_sink=None if w_sink is None else round(w_sink, 3))
             paths.append((np.array([r["rel_pad"][0] for r in log]), np.array([r["hf"] for r in log]),
                           info["outcome"] == "success"))
             if (i + 1) % 10 == 0:
@@ -86,7 +117,7 @@ def exam(model, ckpt, n, device, seed0=9000):
                 print(f"[exam] {i + 1}/{n} flown, safe so far {k}/{i + 1} ({time.time() - t0:.0f} s)", flush=True)
     finally:
         env.close()
-    with open(os.path.join(out, f"exam_{n}.csv"), "w", newline="") as f:
+    with open(os.path.join(out, f"{pre}exam_{n}.csv"), "w", newline="") as f:
         wr = csv.DictWriter(f, fieldnames=list(rows[0]))
         wr.writeheader()
         wr.writerows(rows)
@@ -114,8 +145,15 @@ def exam(model, ckpt, n, device, seed0=9000):
         if rs:
             by_speed.append(f"{lo_v}-{int(hi_v)} m/s: {sum(r['outcome'] == 'success' for r in rs)}/{len(rs)}")
     lines.append("safe by pad speed: " + ", ".join(by_speed))
+    reached = [r for r in rows if r["window_stay"] > 0]
+    lines.append(f"drop gate held >= {T.HOLD_STEPS} steps: {sum(r['gate_run'] >= T.HOLD_STEPS for r in rows)}/{n} flights; "
+                 f"2-4 cm window reached in {len(reached)}/{n}")
+    if reached:
+        lines.append(f"  in the window: longest stay median {np.median([r['window_stay'] for r in reached]):.0f} "
+                     f"steps, sinking speed median {np.median([r['window_sink'] for r in reached]):.2f} m/s "
+                     f"(teacher: 5 steps, 0.01 m/s)")
     txt = "\n".join(lines)
-    open(os.path.join(out, f"exam_{n}_summary.txt"), "w").write(txt + "\n")
+    open(os.path.join(out, f"{pre}exam_{n}_summary.txt"), "w").write(txt + "\n")
     print(txt, flush=True)
     fig, ax = plt.subplots(figsize=(8, 5))
     ax.fill_between([-0.75, 0.75], -0.08, 0, color="gray", alpha=0.6, label="pad")
@@ -128,7 +166,7 @@ def exam(model, ckpt, n, device, seed0=9000):
     ax.set_title(f"Student: {n} test flights relative to the moving pad ({100 * k / n:.0f}% safe)")
     ax.legend()
     fig.tight_layout()
-    fig.savefig(os.path.join(out, "exam_paths.png"), dpi=110)
+    fig.savefig(os.path.join(out, f"{pre}exam_paths.png"), dpi=110)
     plt.close(fig)
 
 
