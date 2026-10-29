@@ -56,7 +56,7 @@ def data(tmp_path_factory):
 def test_build(data):
     d, recs, n = data
     print(f"\n[data] {n} samples, episodes {d.ep.tolist()}, lengths {d.length.tolist()}")
-    assert isinstance(d.images, np.memmap) and d.images.shape == (n, 160, 256)
+    assert isinstance(d.images.parts[0], np.memmap) and d.images.shape == (n, 160, 256)
     assert d.ep.tolist() == [0, 3, 10]
     for (e, rec), start, length in zip(recs, d.start, d.length):
         assert length == len(rec["t"])
@@ -132,7 +132,7 @@ def test_train_bc_script(data, tmp_path, monkeypatch):
     from v6_drop.scripts import train_bc as TB
     d, _, _ = data
     monkeypatch.setattr(TB, "RESULTS", str(tmp_path))
-    data_dir = os.path.dirname(d.images.filename)
+    data_dir = d.paths[0]
     monkeypatch.setattr(sys, "argv", ["train_bc", "--name", "t", "--data", data_dir, "--epochs", "2",
                                       "--batch", "2", "--max-clips", "2", "--device", "cpu"])
     TB.main()

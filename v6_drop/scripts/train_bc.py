@@ -10,8 +10,15 @@ Validation (episodes with id % 10 == 0) after every epoch. Reported per epoch:
   where the student's chance > 0.5) and false drops (share of non-drop steps > 0.5).
 Saves runs/<name>/best.pt (lowest validation loss), last.pt, log.csv, config.json.
 
+Step 6d (DAgger, decided 29 Oct): --data takes several built folders (old demos + DAgger
+rounds) and --init continues from an earlier student (8 epochs per round, D2).
+
 Run (from the repo root; performance mode first):
   nohup python -m v6_drop.scripts.train_bc --name bc256 > v6_drop/results/bc256.log 2>&1 &
+  DAgger round 1:
+  nohup python -m v6_drop.scripts.train_bc --name dagger_r1 --epochs 8 \\
+        --init v6_drop/results/runs/bc256/best.pt \\
+        --data v6_drop/results/bc_data v6_drop/results/dagger_data/r1 > v6_drop/results/dagger_r1.log 2>&1 &
 Watch:  tail -f v6_drop/results/bc256.log | grep --line-buffered "^\\[bc"
 Stop:   pkill -f "v6_drop.scripts.train_bc"
 """
@@ -94,7 +101,9 @@ def run_epoch(model, demos, split, rng, bs, device, amp, opt=None):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--name", default="bc256")
-    ap.add_argument("--data", default=os.path.join(RESULTS, "bc_data"))
+    ap.add_argument("--data", nargs="+", default=[os.path.join(RESULTS, "bc_data")],
+                    help="one or more built dataset folders (6d: demos + DAgger rounds)")
+    ap.add_argument("--init", default=None, help="continue from this checkpoint (6d)")
     ap.add_argument("--epochs", type=int, default=20)
     ap.add_argument("--batch", type=int, default=16, help="clips per batch")
     ap.add_argument("--lr", type=float, default=3e-4)
@@ -113,13 +122,21 @@ def main():
         full = demos.clip_starts
         demos.clip_starts = lambda split, r: full(split, r)[:a.max_clips]
     model = Student(a.size).to(a.device)
+    if a.init:
+        ck0 = torch.load(a.init, map_location=a.device, weights_only=False)
+        assert ck0["size"] == a.size, f"--init has size {ck0['size']}, --size is {a.size}"
+        model.load_state_dict(ck0["model"])
     opt = torch.optim.Adam(model.parameters(), lr=a.lr)
     amp = (not a.no_amp) and a.device.startswith("cuda")
     cfg = dict(vars(a), n_params=n_params(model), amp=amp, drop_weight=DROP_WEIGHT,
-               train_episodes=int(len(demos.episodes("train"))), val_episodes=int(len(demos.episodes("val"))))
+               train_episodes=int(len(demos.episodes("train"))), val_episodes=int(len(demos.episodes("val"))),
+               parts=[dict(path=os.path.abspath(p), samples=n, episodes=m) for p, n, m in demos.part_sizes])
     json.dump(cfg, open(os.path.join(out, "config.json"), "w"), indent=1)
     print(f"[bc] {a.name}: {cfg['n_params']:,} parameters, device {a.device}, amp {amp}, "
-          f"train/val episodes {cfg['train_episodes']}/{cfg['val_episodes']}", flush=True)
+          f"train/val episodes {cfg['train_episodes']}/{cfg['val_episodes']}"
+          + (f", start from {a.init}" if a.init else ""), flush=True)
+    for p, n, m in demos.part_sizes:
+        print(f"[bc]   data {p}: {n:,} samples, {m} episodes", flush=True)
     best = float("inf")
     log_path = os.path.join(out, "log.csv")
     for ep in range(1, a.epochs + 1):

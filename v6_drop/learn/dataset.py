@@ -7,6 +7,8 @@ build(src, dst): one-time conversion of the recorded .npz chunks (results/demos/
   dst/episodes.npz   per episode: id, first row, length (rows of one episode are contiguous
                      and in time order)
 Validation split (decided 29 Oct): every episode whose id ends in 0 (ep % 10 == 0, ~10%).
+Step 6d (29 Oct): DAgger rounds are built the same way into their own folders
+(results/dagger_data/r1, ...); Demos([...]) reads all parts together, no copying.
 
 Clips (decided 29 Oct): a training example is a clip of CLIP = 32 steps (3.2 s) preceded by
 up to BURN = 16 steps (1.6 s) of memory warm-up. Warm-up steps get no loss. Clips are padded
@@ -23,8 +25,8 @@ SCALARS = ("state", "priv", "move", "drop", "flown", "flag", "phase", "ep", "t")
 
 
 def build(src, dst):
-    files = sorted(glob.glob(os.path.join(src, "demos_*.npz")))
-    assert files, f"no demos_*.npz in {src}"
+    files = sorted(glob.glob(os.path.join(src, "demos_*.npz")) + glob.glob(os.path.join(src, "dagger_*.npz")))
+    assert files, f"no demos_*.npz or dagger_*.npz in {src}"
     # pass 1: sizes and episode order
     index = []                                        # (ep, file, row0, n)
     for f in files:
@@ -61,15 +63,60 @@ def build(src, dst):
     return n_total, len(ep_id)
 
 
-class Demos:
-    """Read-only view of a built dataset."""
+class ImageStack:
+    """Several memory-mapped picture files seen as ONE long array (Step 6d: the old demos
+    plus one part per DAgger round, without copying pictures again). Rows are global."""
 
-    def __init__(self, path):
-        self.images = np.load(os.path.join(path, "images.u8.npy"), mmap_mode="r")
-        a = np.load(os.path.join(path, "arrays.npz"))
-        self.a = {k: a[k] for k in a.files}
-        e = np.load(os.path.join(path, "episodes.npz"))
-        self.ep, self.start, self.length = e["ep"], e["start"], e["length"]
+    def __init__(self, parts):
+        self.parts = parts
+        self.row0 = np.cumsum([0] + [len(p) for p in parts])
+        self.shape = (int(self.row0[-1]),) + parts[0].shape[1:]
+
+    def __len__(self):
+        return self.shape[0]
+
+    def __getitem__(self, idx):
+        if isinstance(idx, slice):
+            idx = np.arange(*idx.indices(len(self)))
+        idx = np.asarray(idx)
+        if idx.ndim == 0:
+            k = int(np.searchsorted(self.row0, idx, side="right") - 1)
+            return self.parts[k][int(idx) - self.row0[k]]
+        out = np.empty((len(idx),) + self.shape[1:], np.uint8)
+        k = np.searchsorted(self.row0, idx, side="right") - 1
+        for part in np.unique(k):
+            sel = k == part
+            out[sel] = self.parts[part][idx[sel] - self.row0[part]]
+        return out
+
+
+class Demos:
+    """Read-only view of one or more built datasets (a path or a list of paths).
+    Step 6d: the list is [bc_data, dagger_data/r1, dagger_data/r2, ...]. Episode ids must
+    be unique across the parts (demos 0..; DAgger round r: r x 10000 + i)."""
+
+    def __init__(self, paths):
+        if isinstance(paths, (str, os.PathLike)):
+            paths = [paths]
+        self.paths = [str(p) for p in paths]
+        imgs, arrays, ep, start, length = [], {}, [], [], []
+        row = 0
+        for p in self.paths:
+            im = np.load(os.path.join(p, "images.u8.npy"), mmap_mode="r")
+            a = np.load(os.path.join(p, "arrays.npz"))
+            for k in a.files:
+                arrays.setdefault(k, []).append(a[k])
+            e = np.load(os.path.join(p, "episodes.npz"))
+            ep.append(e["ep"])
+            start.append(e["start"] + row)
+            length.append(e["length"])
+            imgs.append(im)
+            row += len(im)
+        self.images = ImageStack(imgs)
+        self.a = {k: np.concatenate(v) for k, v in arrays.items()}
+        self.ep, self.start, self.length = np.concatenate(ep), np.concatenate(start), np.concatenate(length)
+        assert len(np.unique(self.ep)) == len(self.ep), "episode ids repeat across the parts"
+        self.part_sizes = [(p, len(im), len(e)) for p, im, e in zip(self.paths, imgs, ep)]
         self.val = (self.ep % 10) == 0
 
     def episodes(self, split):
@@ -122,6 +169,8 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Build the BC dataset from recorded demos")
     ap.add_argument("--src", default=os.path.join(os.path.dirname(__file__), "..", "results", "demos"))
     ap.add_argument("--dst", default=os.path.join(os.path.dirname(__file__), "..", "results", "bc_data"))
+    # Step 6d, DAgger round 1:
+    #   python -m v6_drop.learn.dataset --src v6_drop/results/dagger/r1 --dst v6_drop/results/dagger_data/r1
     args = ap.parse_args()
     n, m = build(args.src, args.dst)
     d = Demos(args.dst)
