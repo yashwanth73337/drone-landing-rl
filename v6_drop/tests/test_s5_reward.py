@@ -152,6 +152,25 @@ def test_end_marks():
     assert set(W.OUTCOMES) == set(RW.END_MARKS) | {"success", "hard_landing"}
 
 
+def test_drop_bonus_never_pays_less_than_auto_cut():
+    """Step 7 P1 (B): for the same landing spot, any safe drop (impact 0-1 m/s) scores at
+    least as much as any safe auto-cut, and a softer drop scores more than a harder one."""
+    assert RW.DROP_BONUS == RW.SOFT_BONUS
+    v = np.linspace(0.0, 1.0, 21)
+    for xy in ([0.0, 0.0], [0.2, 0.0], [0.5, 0.3]):
+        drop = np.array([RW.end_mark("success", dict(land_xy=xy, impact=x, reason="drop")) for x in v])
+        cut = np.array([RW.end_mark("success", dict(land_xy=xy, impact=x, reason="auto_cut")) for x in v])
+        assert drop.min() >= cut.max() - 1e-9
+        assert np.all(np.diff(drop) < 0)                       # softer drop -> more
+        assert np.allclose(drop - cut, RW.DROP_BONUS)
+    d07 = RW.end_mark("success", dict(land_xy=[0.2, 0.0], impact=0.70, reason="drop"))
+    c016 = RW.end_mark("success", dict(land_xy=[0.2, 0.0], impact=0.16, reason="auto_cut"))
+    print(f"\n[drop bonus] 20 cm from centre: drop 0.70 m/s -> {d07:.2f}, auto-cut 0.16 m/s -> {c016:.2f}")
+    assert d07 == pytest.approx(14.07, abs=0.01) and c016 == pytest.approx(13.15, abs=0.01)
+    # the bonus is only for a SAFE drop: a hard drop is still punished, no bonus
+    assert RW.end_mark("hard_landing", dict(impact=1.36, reason="drop")) == pytest.approx(-0.72)
+
+
 # ---------------------------------------------------------------- 6. whole episodes
 def scripted(env):
     """TEST helper using the truth: follow the pad, come down along the glide slope,
@@ -195,7 +214,9 @@ def test_scripted_landing_scores_high(env, pad_speed):
           f"+ end {sums['end']:.2f}  (impact {td['impact']:.2f} m/s)")
     assert info["outcome"] == "success"
     assert sums["progress"] == pytest.approx(3.0, abs=0.15)     # Phi_start = -max(3, 2.5)
-    assert 11.0 < total < 16.0
+    assert info["touchdown"]["reason"] == "drop"
+    assert sums["end"] == pytest.approx(RW.end_mark("success", td))
+    assert 13.0 < total < 18.0          # Step 7: +2 drop bonus (was 11-16)
 
 
 def test_hover_until_timeout(env, monkeypatch):

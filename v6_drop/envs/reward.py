@@ -19,10 +19,17 @@ R3  If the camera has no CONFIDENT measurement (no marker >= MIN_SIDE_PX wide), 
 R4  Every step costs TIME_PENALTY.
 R5  End marks (added on the last step):
       success           +10 + up to +2 for landing near the centre + up to +2 for softness
+                        + DROP_BONUS (+2) if the landing was a DROP (Step 7, P1 option B, 30 Oct)
       hard_landing      -2 * (impact - 1.0), floored at -10 (= 6 m/s): every bit slower helps
       slide_off, tip_over, not_still     -3
       crash_platform, crash_ground, flip, lost   -10
       timeout           0 (the time cost has already added up)
+Why the drop bonus (Step 7, P1 = B, decided 30 Oct after the supervisor said drops are the
+direction): the softness bonus alone pays a slow auto-cut touch (~0.16 m/s -> 13.15 at 20 cm
+from the centre) more than a safe drop (~0.70 m/s -> 12.07), so PPO would learn to stop
+dropping. DROP_BONUS = SOFT_BONUS, so ANY safe drop scores at least as much as ANY safe
+auto-cut landing at the same spot (equal only for a 1.0 m/s drop vs a 0.0 m/s touch), and a
+softer drop still scores more than a harder one. Auto-cut stays a safe landing (fallback).
 No progress mark is computed on the last step (after a touchdown or crash the camera
 view says nothing useful); the end mark covers it.
 
@@ -41,6 +48,7 @@ SUCCESS = 10.0
 CENTRE_BONUS = 2.0              # at the exact centre, 0 at CENTRE_RADIUS
 CENTRE_RADIUS = 0.75            # m (the pad half-size)
 SOFT_BONUS = 2.0                # at 0 m/s, 0 at V_IMPACT_MAX
+DROP_BONUS = 2.0                # Step 7 P1 (B): safe landing by DROP (touchdown reason 'drop')
 V_IMPACT_MAX = 1.0
 HARD_SLOPE = 2.0                # per m/s above V_IMPACT_MAX
 HARD_FLOOR = -10.0
@@ -69,7 +77,8 @@ def end_mark(outcome, touchdown):
         r = float(np.linalg.norm(touchdown["land_xy"]))
         centre = CENTRE_BONUS * max(0.0, 1.0 - r / CENTRE_RADIUS)
         soft = SOFT_BONUS * max(0.0, 1.0 - touchdown["impact"] / V_IMPACT_MAX)
-        return SUCCESS + centre + soft
+        drop = DROP_BONUS if touchdown.get("reason") == "drop" else 0.0
+        return SUCCESS + centre + soft + drop
     if outcome == "hard_landing":
         return max(HARD_FLOOR, -HARD_SLOPE * (touchdown["impact"] - V_IMPACT_MAX))
     return END_MARKS[outcome]
