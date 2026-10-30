@@ -20,6 +20,10 @@ Per flight it also records the drop chance p at every step:
             have dropped somewhere the clean rule would not (computed in every mode)
   coin_drop = the flight ended by a drop with p <= 0.5 (only possible with the coin)
 
+Shield (Step 7e): --shield L flies with the camera-based drop shield (envs/landing_env.py,
+predicted impact <= L m/s). Rows then also count the blocked drop presses ('vetoes'); the
+output folder gets the suffix _shield<L x 100>, e.g. dice_exam_100_shield80.
+
 Parallel: W worker processes, one EGL simulator each (B5 rule), student on the CPU with one
 thread per worker (as dagger_collect). The summary also gives decisions per second (P7).
 
@@ -72,14 +76,15 @@ def choose(mean, p, mode, sig_n, rng):
 
 
 def fly_dice(env, model, seed, mode, sig_n):
-    """One flight of the dice exam. Returns a row dict."""
+    """One flight of the dice exam. Returns a row dict. A drop the shield blocks does not
+    count as a drop (feet/chance at the drop are those of the drop that happened)."""
     import torch
     from v6_drop.envs import lmf2_params as P
     from v6_drop.envs.platform_s1 import PAD_TOP_Z
     rng = dice_rng(seed, mode)
     obs, info0 = env.reset(seed=seed)
     hc, steps, ret = None, 0, 0.0
-    p_far, log_keep, feet_drop, coin, p_last = [], 0.0, None, False, 0.0
+    p_far, log_keep, feet_drop, coin, p_last, vetoes = [], 0.0, None, False, 0.0, 0
     while True:
         s = env.world.true_state()
         hf = float(s["pos"][2] - PAD_TOP_Z - P.REST_HEIGHT)
@@ -88,14 +93,16 @@ def fly_dice(env, model, seed, mode, sig_n):
         with torch.no_grad():
             mean, logit, _, hc = model(img, st, hc)
         p = float(torch.sigmoid(logit).item())
-        move, drop, coin = choose(mean[0, 0].numpy(), p, mode, sig_n, rng)
+        move, drop, coin_now = choose(mean[0, 0].numpy(), p, mode, sig_n, rng)
         if hf > FAR_FEET:
             p_far.append(p)
         if p <= 0.5:
             log_keep += np.log1p(-min(p, 1 - 1e-12))
-        if drop:
-            feet_drop, p_last = hf, p
         obs, r, term, trunc, info = env.step({"move": move, "drop": drop})
+        if info.get("shield_veto"):
+            vetoes += 1
+        elif drop:
+            feet_drop, p_last, coin = hf, p, coin_now
         ret += r
         steps += 1
         if term or trunc:
@@ -110,17 +117,17 @@ def fly_dice(env, model, seed, mode, sig_n):
                 drop_chance_at_drop=None if feet_drop is None else round(p_last, 4),
                 coin_drop=coin, steps=steps, time_s=round(steps * P.POLICY_DT, 1), ret=round(ret, 3),
                 p_far_median=round(float(np.median(pf)), 6), p_far_max=round(float(pf.max()), 4),
-                coin_risk=round(float(1.0 - np.exp(log_keep)), 4))
+                coin_risk=round(float(1.0 - np.exp(log_keep)), 4), vetoes=vetoes)
 
 
-def worker(w, tasks, ckpt, renderer, sigma, q):
+def worker(w, tasks, ckpt, renderer, sigma, q, shield=None):
     import torch
     torch.set_num_threads(1)
     from v6_drop.envs import landing_env as E
     from v6_drop.scripts.eval_student import load
     model, _ = load(ckpt, "cpu")
     sig_n = sigma_norm(sigma)
-    env = E.LandingEnv(renderer=renderer, seed=0)
+    env = E.LandingEnv(renderer=renderer, seed=0, drop_shield=shield)
     rows, t0 = [], time.time()
     try:
         for j, (mode, seed) in enumerate(tasks):
@@ -144,7 +151,7 @@ def _f(x, fmt="{:.2f}"):
     return "-" if x is None else fmt.format(x)
 
 
-def summarize(rows, out, ckpt, sigma, wall_s, workers):
+def summarize(rows, out, ckpt, sigma, wall_s, workers, shield=None):
     rows = sorted(rows, key=lambda r: (MODES.index(r["mode"]), r["seed"]))
     os.makedirs(out, exist_ok=True)
     with open(os.path.join(out, "flights.csv"), "w", newline="") as f:
@@ -154,6 +161,7 @@ def summarize(rows, out, ckpt, sigma, wall_s, workers):
     steps = sum(r["steps"] for r in rows)
     lines = [f"Dice exam: {os.path.abspath(ckpt)}",
              f"move noise sigma: vx {sigma[0]}, vy {sigma[1]}, vz {sigma[2]} m/s, yaw rate {sigma[3]} deg/s",
+             "drop shield: " + ("off" if shield is None else f"predicted impact <= {shield} m/s (camera + IMU)"),
              f"speed: {len(rows)} flights, {steps:,} decisions in {wall_s / 60:.1f} min with {workers} workers "
              f"= {steps / wall_s:.0f} decisions/s", ""]
     for mode in MODES:
@@ -184,6 +192,8 @@ def summarize(rows, out, ckpt, sigma, wall_s, workers):
                   f"{sum(r['outcome'] == 'success' for r in coin)}); feet at the drop median "
                   f"{_f(np.median(fd) if fd else None, '{:.1f}')} cm, max {_f(max(fd) if fd else None, '{:.1f}')} cm",
                   f"impact (safe): mean {_f(np.mean(imp) if imp else None)}, max {_f(max(imp) if imp else None)} m/s",
+                  f"shield vetoes (blocked drop presses): {sum(r['vetoes'] for r in rs)} in "
+                  f"{sum(r['vetoes'] > 0 for r in rs)} flights",
                   f"return: mean {np.mean([r['ret'] for r in rs]):.2f}; time mean {np.mean([r['time_s'] for r in rs]):.1f} s",
                   f"drop chance far from the pad (feet > {FAR_FEET} m): median over flights of the per-flight "
                   f"median {np.median([r['p_far_median'] for r in rs]):.5f}, highest {max(r['p_far_max'] for r in rs):.4f}",
@@ -195,10 +205,11 @@ def summarize(rows, out, ckpt, sigma, wall_s, workers):
     print(txt, flush=True)
 
 
-def out_dir(ckpt, n):
+def out_dir(ckpt, n, shield=None):
     stem = os.path.splitext(os.path.basename(ckpt))[0]
     pre = "" if stem == "last" else stem + "_"
-    return os.path.join(os.path.dirname(os.path.abspath(ckpt)), f"{pre}dice_exam_{n}")
+    suf = "" if shield is None else f"_shield{round(100 * shield)}"
+    return os.path.join(os.path.dirname(os.path.abspath(ckpt)), f"{pre}dice_exam_{n}{suf}")
 
 
 def main():
@@ -210,12 +221,13 @@ def main():
     ap.add_argument("--renderer", choices=["egl", "tiny"], default="egl")
     ap.add_argument("--sigma", type=float, nargs=4, default=list(SIGMA),
                     help="vx vy vz [m/s] yaw-rate [deg/s]")
+    ap.add_argument("--shield", type=float, default=None, help="drop shield limit, m/s (Step 7e: 0.8)")
     a = ap.parse_args()
     tasks = [(m, SEED0 + i) for m in a.modes for i in range(a.n)]
     ctx = mp.get_context("spawn")
     q = ctx.Queue()
     t0 = time.time()
-    procs = [ctx.Process(target=worker, args=(w, tasks[w::a.workers], a.ckpt, a.renderer, a.sigma, q))
+    procs = [ctx.Process(target=worker, args=(w, tasks[w::a.workers], a.ckpt, a.renderer, a.sigma, q, a.shield))
              for w in range(a.workers)]
     for pr in procs:
         pr.start()
@@ -226,7 +238,7 @@ def main():
         pr.join()
     wall = time.time() - t0
     print(f"[dice] {len(rows)} flights in {wall / 60:.1f} min", flush=True)
-    summarize(rows, out_dir(a.ckpt, a.n), a.ckpt, a.sigma, wall, a.workers)
+    summarize(rows, out_dir(a.ckpt, a.n, a.shield), a.ckpt, a.sigma, wall, a.workers, a.shield)
 
 
 if __name__ == "__main__":

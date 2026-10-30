@@ -98,14 +98,15 @@ def wilson(k, n, z=1.96):
     return 100 * (c - hw), 100 * (c + hw)
 
 
-def exam(model, ckpt, n, device, seed0=9000):
+def exam(model, ckpt, n, device, seed0=9000, shield=None):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     out = os.path.dirname(os.path.abspath(ckpt))
     stem = os.path.splitext(os.path.basename(ckpt))[0]
-    pre = "" if stem == "last" else stem + "_"
-    env = E.LandingEnv(renderer="egl", seed=0)
+    pre = ("" if stem == "last" else stem + "_") + ("" if shield is None else f"shield{round(100 * shield)}_")
+    kw = {} if shield is None else dict(drop_shield=shield)      # no shield = the old call exactly
+    env = E.LandingEnv(renderer="egl", seed=0, **kw)
     rows, paths, t0 = [], [], time.time()
     try:
         for i in range(n):
@@ -199,13 +200,15 @@ def main():
     ap.add_argument("--n", type=int, default=100)
     ap.add_argument("--videos", type=int, nargs="*", default=None)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--shield", type=float, default=None, help="drop shield limit, m/s (Step 7e: 0.8)")
     a = ap.parse_args()
     model, ck = load(a.ckpt, a.device)
-    print(f"[exam] loaded {a.ckpt} (epoch {ck['epoch']}, size {ck['size']})", flush=True)
+    when = f"epoch {ck['epoch']}" if "epoch" in ck else f"PPO round {ck.get('round')}"   # 7e: PPO files
+    print(f"[exam] loaded {a.ckpt} ({when}, size {ck['size']})", flush=True)
     if a.videos:
         videos(model, a.ckpt, a.videos, a.device)
     else:
-        exam(model, a.ckpt, a.n, a.device)
+        exam(model, a.ckpt, a.n, a.device, shield=a.shield)
 
 
 if __name__ == "__main__":

@@ -27,6 +27,18 @@ Reward (Step 5, envs/reward.py): camera-based fair progress + visibility and tim
 + end marks. info["reward_terms"] has the breakdown. reward_source="true" = ablation.
 The applied command at reset = the drone's current heading-frame velocity (clipped to the
 ranges), yaw rate 0, so the controller does not brake hard at the first decision.
+
+Drop SHIELD (Step 7e, decided 30 Oct, option C; Alshiekh et al. 2018 "Safe RL via
+shielding"): with drop_shield = L (m/s), a drop the policy asks for is carried out only if a
+physics check on ONBOARD data predicts a safe impact:
+  h      feet height above the pad top from the last CONFIDENT ArUco + solvePnP measurement
+         (the camera frame the policy just saw) and the drone's own orientation (IMU)
+  sink   the drone's own downward speed (IMU/EKF); Stage 1 pads move only horizontally,
+         so this is the relative sink speed
+  pred = sqrt(sink^2 + 2 g h) <= L     (same formula as the safe30m gate; L = 0.8 there)
+No confident measurement -> no drop. A blocked drop = the drone keeps flying this step
+(drop = 0); info: drop_requested, shield_veto, shield_pred (m/s), shield_feet (m).
+drop_shield=None (default) = no shield, exactly the old behaviour.
 """
 import cv2
 import gymnasium as gym
@@ -35,7 +47,8 @@ from gymnasium import spaces
 
 from . import pad_board as PB
 from .lee_controller import yaw_rotation
-from .reward import Reward
+from . import lmf2_params as P
+from .reward import Reward, geometry_from_body
 from .platform_s1 import V_MAX
 from .world import World
 
@@ -62,12 +75,15 @@ class LandingEnv(gym.Env):
     metadata = {"render_modes": []}
 
     def __init__(self, renderer="egl", seed=0, gains_mode="random", layout=PB.DEFAULT_LAYOUT,
-                 reward_source="camera", headless=False):
+                 reward_source="camera", headless=False, drop_shield=None):
         """headless=True (Step 6): no camera image per step (blank image), reward 0 and
         info['reward_terms'] None. ONLY for fast teacher evaluation; never for training.
         Episode starts still use the camera (start rule: >= 1 marker detected)."""
         super().__init__()
         self.headless = bool(headless)
+        self.drop_shield = None if drop_shield is None else float(drop_shield)
+        assert not (self.headless and self.drop_shield is not None), "the shield needs camera images"
+        self.last_meas = None                      # measurement of the frame the policy sees
         self.reward_fn = Reward(reward_source)
         self.world = World(renderer=renderer, layout=layout, seed=seed, gains_mode=gains_mode)
         f32 = np.float32
@@ -114,28 +130,50 @@ class LandingEnv(gym.Env):
         self.applied = np.clip(np.array([*v_head, 0.0]), -ACT_SCALE, ACT_SCALE)
         self.asked = self.applied.copy()
         self.reward_fn.reset(out["measurement"], s)
+        self.last_meas = out["measurement"]
         info = dict(spawn=out["spawn"], tries=out["tries"], pad_speed=self.world.plat.v,
                     start_marker_ids=list(out["measurement"].ids))
         return self._obs(out["image"]), info
 
+    def shield_check(self):
+        """(allowed, predicted impact m/s or None, feet height m or None) from onboard data
+        only: the last confident camera measurement + the drone's own orientation and
+        vertical velocity."""
+        m = self.last_meas
+        if m is None or not (m.ok and m.confident):
+            return False, None, None
+        s = self.world.true_state()                        # own R and v (IMU / EKF)
+        _, h = geometry_from_body(m.p_body, s["R"])
+        h_feet = max(h - P.REST_HEIGHT, 0.0)
+        sink = max(-float(s["v"][2]), 0.0)
+        pred = float(np.sqrt(sink * sink + 2.0 * P.G * h_feet))
+        return pred <= self.drop_shield, pred, h_feet
+
     def step(self, action):
         move = np.clip(np.asarray(action["move"], dtype=np.float64), -1.0, 1.0)
-        drop = bool(int(action["drop"]))
+        drop_req = bool(int(action["drop"]))
+        veto, pred, h_feet = False, None, None
+        if drop_req and self.drop_shield is not None:
+            ok, pred, h_feet = self.shield_check()
+            veto = not ok
+        drop = drop_req and not veto
+        sh = dict(drop_requested=drop_req, shield_veto=veto, shield_pred=pred, shield_feet=h_feet)
         self.asked = move * ACT_SCALE
         self.applied = rate_limit(self.applied, self.asked)
         term, trunc, info = self.world.step(self.applied.copy(), drop=drop)
         if self.headless:
             obs = self._obs(np.zeros((self.world.cam.h, self.world.cam.w), np.uint8))
             info.update(applied=self.applied.copy(), asked=self.asked.copy(), drop=drop,
-                        reward_terms=None)
+                        reward_terms=None, **sh)
             return obs, 0.0, term, trunc, info
         img = self.world.render()
         obs = self._obs(img)
         meas = None
         if info["outcome"] is None:                        # no camera reward after the end
             meas = PB.measure(img, self.world.cam, self.world.layout, self.world.det)
+        self.last_meas = meas
         reward, terms = self.reward_fn.step(meas, self.world.true_state(), info["outcome"],
                                             info.get("touchdown"))
         info.update(applied=self.applied.copy(), asked=self.asked.copy(), drop=drop,
-                    reward_terms=terms)
+                    reward_terms=terms, **sh)
         return obs, reward, term, trunc, info

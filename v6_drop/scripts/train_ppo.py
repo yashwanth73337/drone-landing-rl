@@ -19,6 +19,11 @@ Guard (P5): every --exam-every PPO rounds a CLEAN exam (no dice) on the dev seed
 (--exam-n flights) runs in the workers; the checkpoint is saved as r<round>.pt; if the
 safe count falls below --guard % the run STOPS (then: add a copy/KL anchor).
 
+Shield (Step 7e): --shield L uses the camera-based drop shield in the workers' simulators
+(training flights AND exams): a drop is carried out only if the onboard predicted impact
+<= L m/s. A blocked press is part of the environment (nothing happens), so the stored
+action stays the policy's own choice. 'vetoes' = blocked presses per round.
+
 Checkpoints: results/runs/<name>/last.pt every round (+ r<round>.pt at each exam). Key
 'model' = the student, so eval_student / dice_exam read them as they are.
 
@@ -44,7 +49,7 @@ DEV_SEED0 = 9000
 
 
 # ------------------------------------------------------------------ worker process
-def worker(w, cmd_q, res_q, renderer, sigma, run_seed):
+def worker(w, cmd_q, res_q, renderer, sigma, run_seed, shield=None):
     import torch
     torch.set_num_threads(1)
     from v6_drop.envs import landing_env as E
@@ -52,7 +57,7 @@ def worker(w, cmd_q, res_q, renderer, sigma, run_seed):
     from v6_drop.scripts.dice_exam import fly_dice, sigma_norm
     sig_n = sigma_norm(sigma)
     model = PPO.ActorCritic(sigma_n=sig_n).eval()
-    env = E.LandingEnv(renderer=renderer, seed=0)
+    env = E.LandingEnv(renderer=renderer, seed=0, drop_shield=shield)
     rng = np.random.default_rng([int(run_seed), w, 11])
     ep_count, need_reset, obs, hc = 0, True, None, None
     ep = {}
@@ -73,7 +78,7 @@ def worker(w, cmd_q, res_q, renderer, sigma, run_seed):
             keys = ("image", "state", "priv", "move_raw", "drop", "logp", "value", "start",
                     "h", "c", "reward", "terminated", "truncated", "boot", "p_drop")
             buf = {k: [] for k in keys}
-            flights = []
+            flights, n_veto = [], 0
             for _ in range(T):
                 start = 0
                 if need_reset:
@@ -92,6 +97,7 @@ def worker(w, cmd_q, res_q, renderer, sigma, run_seed):
                     buf[k].append(obs[k])
                 buf["start"].append(start)
                 obs, r, term, trunc, info = env.step(action)
+                n_veto += int(bool(info.get("shield_veto")))
                 trunc = bool(trunc and not term)
                 buf["reward"].append(r)
                 buf["terminated"].append(bool(term))
@@ -108,7 +114,7 @@ def worker(w, cmd_q, res_q, renderer, sigma, run_seed):
             last_value = 0.0 if need_reset else PPO.value_of(model, obs, hc)
             arrays = {k: np.asarray(v) for k, v in buf.items()}
             arrays["image"] = arrays["image"].astype(np.uint8)
-            res_q.put(("roll", w, arrays, float(last_value), flights))
+            res_q.put(("roll", w, arrays, float(last_value), flights, n_veto))
     finally:
         env.close()
 
@@ -223,6 +229,7 @@ def main(argv=None):
     ap.add_argument("--exam-n", type=int, default=100)
     ap.add_argument("--guard", type=float, default=90.0)
     ap.add_argument("--sigma", type=float, nargs=4, default=list(SIGMA))
+    ap.add_argument("--shield", type=float, default=None, help="drop shield limit, m/s (Step 7e: 0.8)")
     ap.add_argument("--renderer", choices=["egl", "tiny"], default="egl")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--seed", type=int, default=0)
@@ -256,7 +263,8 @@ def main(argv=None):
     ctx = mp.get_context("spawn")
     cmd_qs = [ctx.Queue() for _ in range(a.workers)]
     res_q = ctx.Queue()
-    procs = [ctx.Process(target=worker, args=(w, cmd_qs[w], res_q, a.renderer, a.sigma, a.seed), daemon=True)
+    procs = [ctx.Process(target=worker, args=(w, cmd_qs[w], res_q, a.renderer, a.sigma, a.seed, a.shield),
+                         daemon=True)
              for w in range(a.workers)]
     for p in procs:
         p.start()
@@ -304,6 +312,7 @@ def main(argv=None):
                        flights=nf, safe_pct=round(100 * safe / nf, 1) if nf else None,
                        drop_pct=round(100 * drops / nf, 1) if nf else None,
                        hard=sum(f["outcome"] == "hard_landing" for f in flights),
+                       vetoes=sum(r[3] for r in res),
                        ret=round(float(np.mean([f["ret"] for f in flights])), 2) if nf else None,
                        ev=round(ev, 3), v_loss=round(m["v_loss"], 4),
                        pg_loss=round(m.get("pg_loss", 0.0), 4), kl=round(m.get("kl", 0.0), 5),
@@ -319,7 +328,7 @@ def main(argv=None):
             mw.writerow(row)
             mf.flush()
             print(f"[ppo] r {rnd} {row['phase']} | steps {steps:,} | flights {nf} safe {row['safe_pct']}% "
-                  f"drop {row['drop_pct']}% hard {row['hard']} | ret {row['ret']} | EV {row['ev']:.2f} "
+                  f"drop {row['drop_pct']}% hard {row['hard']} veto {row['vetoes']} | ret {row['ret']} | EV {row['ev']:.2f} "
                   f"Vloss {row['v_loss']:.3f} | KL {row['kl']:.4f} clip {row['clipfrac']:.2f} ep {row['epochs']} | "
                   f"std vx {row['std_vx']:.3f} vz {row['std_vz']:.3f} | lr {lr_a:.1e} | "
                   f"{row['t_collect']:.0f}+{row['t_learn']:.0f} s, {row['dps']:.0f} dec/s", flush=True)
