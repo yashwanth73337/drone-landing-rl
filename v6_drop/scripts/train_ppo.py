@@ -23,6 +23,7 @@ Shield (Step 7e): --shield L uses the camera-based drop shield in the workers' s
 (training flights AND exams): a drop is carried out only if the onboard predicted impact
 <= L m/s. A blocked press is part of the environment (nothing happens), so the stored
 action stays the policy's own choice. 'vetoes' = blocked presses per round.
+Press cost (Step 7f): --veto-cost c makes every blocked press cost c (default 0 = ppo2).
 
 Checkpoints: results/runs/<name>/last.pt every round (+ r<round>.pt at each exam). Key
 'model' = the student, so eval_student / dice_exam read them as they are.
@@ -49,7 +50,7 @@ DEV_SEED0 = 9000
 
 
 # ------------------------------------------------------------------ worker process
-def worker(w, cmd_q, res_q, renderer, sigma, run_seed, shield=None):
+def worker(w, cmd_q, res_q, renderer, sigma, run_seed, shield=None, veto_cost=0.0):
     import torch
     torch.set_num_threads(1)
     from v6_drop.envs import landing_env as E
@@ -57,7 +58,7 @@ def worker(w, cmd_q, res_q, renderer, sigma, run_seed, shield=None):
     from v6_drop.scripts.dice_exam import fly_dice, sigma_norm
     sig_n = sigma_norm(sigma)
     model = PPO.ActorCritic(sigma_n=sig_n).eval()
-    env = E.LandingEnv(renderer=renderer, seed=0, drop_shield=shield)
+    env = E.LandingEnv(renderer=renderer, seed=0, drop_shield=shield, veto_cost=veto_cost)
     rng = np.random.default_rng([int(run_seed), w, 11])
     ep_count, need_reset, obs, hc = 0, True, None, None
     ep = {}
@@ -230,6 +231,7 @@ def main(argv=None):
     ap.add_argument("--guard", type=float, default=90.0)
     ap.add_argument("--sigma", type=float, nargs=4, default=list(SIGMA))
     ap.add_argument("--shield", type=float, default=None, help="drop shield limit, m/s (Step 7e: 0.8)")
+    ap.add_argument("--veto-cost", type=float, default=0.0, help="cost per blocked drop press (Step 7f: 0.05)")
     ap.add_argument("--renderer", choices=["egl", "tiny"], default="egl")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--seed", type=int, default=0)
@@ -263,7 +265,7 @@ def main(argv=None):
     ctx = mp.get_context("spawn")
     cmd_qs = [ctx.Queue() for _ in range(a.workers)]
     res_q = ctx.Queue()
-    procs = [ctx.Process(target=worker, args=(w, cmd_qs[w], res_q, a.renderer, a.sigma, a.seed, a.shield),
+    procs = [ctx.Process(target=worker, args=(w, cmd_qs[w], res_q, a.renderer, a.sigma, a.seed, a.shield, a.veto_cost),
                          daemon=True)
              for w in range(a.workers)]
     for p in procs:

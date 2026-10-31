@@ -23,6 +23,7 @@ Per flight it also records the drop chance p at every step:
 Shield (Step 7e): --shield L flies with the camera-based drop shield (envs/landing_env.py,
 predicted impact <= L m/s). Rows then also count the blocked drop presses ('vetoes'); the
 output folder gets the suffix _shield<L x 100>, e.g. dice_exam_100_shield80.
+--veto-cost c (Step 7f) only changes the RETURN (c per blocked press); flights are identical.
 
 Parallel: W worker processes, one EGL simulator each (B5 rule), student on the CPU with one
 thread per worker (as dagger_collect). The summary also gives decisions per second (P7).
@@ -120,14 +121,14 @@ def fly_dice(env, model, seed, mode, sig_n):
                 coin_risk=round(float(1.0 - np.exp(log_keep)), 4), vetoes=vetoes)
 
 
-def worker(w, tasks, ckpt, renderer, sigma, q, shield=None):
+def worker(w, tasks, ckpt, renderer, sigma, q, shield=None, veto_cost=0.0):
     import torch
     torch.set_num_threads(1)
     from v6_drop.envs import landing_env as E
     from v6_drop.scripts.eval_student import load
     model, _ = load(ckpt, "cpu")
     sig_n = sigma_norm(sigma)
-    env = E.LandingEnv(renderer=renderer, seed=0, drop_shield=shield)
+    env = E.LandingEnv(renderer=renderer, seed=0, drop_shield=shield, veto_cost=veto_cost)
     rows, t0 = [], time.time()
     try:
         for j, (mode, seed) in enumerate(tasks):
@@ -151,7 +152,7 @@ def _f(x, fmt="{:.2f}"):
     return "-" if x is None else fmt.format(x)
 
 
-def summarize(rows, out, ckpt, sigma, wall_s, workers, shield=None):
+def summarize(rows, out, ckpt, sigma, wall_s, workers, shield=None, veto_cost=0.0):
     rows = sorted(rows, key=lambda r: (MODES.index(r["mode"]), r["seed"]))
     os.makedirs(out, exist_ok=True)
     with open(os.path.join(out, "flights.csv"), "w", newline="") as f:
@@ -161,7 +162,8 @@ def summarize(rows, out, ckpt, sigma, wall_s, workers, shield=None):
     steps = sum(r["steps"] for r in rows)
     lines = [f"Dice exam: {os.path.abspath(ckpt)}",
              f"move noise sigma: vx {sigma[0]}, vy {sigma[1]}, vz {sigma[2]} m/s, yaw rate {sigma[3]} deg/s",
-             "drop shield: " + ("off" if shield is None else f"predicted impact <= {shield} m/s (camera + IMU)"),
+             "drop shield: " + ("off" if shield is None else f"predicted impact <= {shield} m/s (camera + IMU)")
+             + f"; press cost {veto_cost} per blocked press",
              f"speed: {len(rows)} flights, {steps:,} decisions in {wall_s / 60:.1f} min with {workers} workers "
              f"= {steps / wall_s:.0f} decisions/s", ""]
     for mode in MODES:
@@ -222,12 +224,14 @@ def main():
     ap.add_argument("--sigma", type=float, nargs=4, default=list(SIGMA),
                     help="vx vy vz [m/s] yaw-rate [deg/s]")
     ap.add_argument("--shield", type=float, default=None, help="drop shield limit, m/s (Step 7e: 0.8)")
+    ap.add_argument("--veto-cost", type=float, default=0.0, help="cost per blocked drop press (Step 7f: 0.05)")
     a = ap.parse_args()
     tasks = [(m, SEED0 + i) for m in a.modes for i in range(a.n)]
     ctx = mp.get_context("spawn")
     q = ctx.Queue()
     t0 = time.time()
-    procs = [ctx.Process(target=worker, args=(w, tasks[w::a.workers], a.ckpt, a.renderer, a.sigma, q, a.shield))
+    procs = [ctx.Process(target=worker, args=(w, tasks[w::a.workers], a.ckpt, a.renderer, a.sigma, q, a.shield,
+                                                       a.veto_cost))
              for w in range(a.workers)]
     for pr in procs:
         pr.start()
@@ -238,7 +242,7 @@ def main():
         pr.join()
     wall = time.time() - t0
     print(f"[dice] {len(rows)} flights in {wall / 60:.1f} min", flush=True)
-    summarize(rows, out_dir(a.ckpt, a.n, a.shield), a.ckpt, a.sigma, wall, a.workers, a.shield)
+    summarize(rows, out_dir(a.ckpt, a.n, a.shield), a.ckpt, a.sigma, wall, a.workers, a.shield, a.veto_cost)
 
 
 if __name__ == "__main__":

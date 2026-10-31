@@ -39,6 +39,13 @@ physics check on ONBOARD data predicts a safe impact:
 No confident measurement -> no drop. A blocked drop = the drone keeps flying this step
 (drop = 0); info: drop_requested, shield_veto, shield_pred (m/s), shield_feet (m).
 drop_shield=None (default) = no shield, exactly the old behaviour.
+
+Press cost (Step 7f, decided 31 Oct, F1; the 'punish the learner when the shield steps
+in' variant of shielding): with veto_cost = c, every drop press the shield BLOCKS costs c
+(reward - c, info reward_terms['veto'] = -c). Reason: in ppo2 a blocked press was free, so
+the policy drifted to pressing at every low step ("press and wait") and some clean flights
+hovered until the timeout. A carried-out drop and a step without a press cost nothing.
+veto_cost=0.0 (default) = exactly the old behaviour.
 """
 import cv2
 import gymnasium as gym
@@ -75,7 +82,7 @@ class LandingEnv(gym.Env):
     metadata = {"render_modes": []}
 
     def __init__(self, renderer="egl", seed=0, gains_mode="random", layout=PB.DEFAULT_LAYOUT,
-                 reward_source="camera", headless=False, drop_shield=None):
+                 reward_source="camera", headless=False, drop_shield=None, veto_cost=0.0):
         """headless=True (Step 6): no camera image per step (blank image), reward 0 and
         info['reward_terms'] None. ONLY for fast teacher evaluation; never for training.
         Episode starts still use the camera (start rule: >= 1 marker detected)."""
@@ -83,6 +90,8 @@ class LandingEnv(gym.Env):
         self.headless = bool(headless)
         self.drop_shield = None if drop_shield is None else float(drop_shield)
         assert not (self.headless and self.drop_shield is not None), "the shield needs camera images"
+        self.veto_cost = float(veto_cost)
+        assert self.veto_cost >= 0.0
         self.last_meas = None                      # measurement of the frame the policy sees
         self.reward_fn = Reward(reward_source)
         self.world = World(renderer=renderer, layout=layout, seed=seed, gains_mode=gains_mode)
@@ -174,6 +183,8 @@ class LandingEnv(gym.Env):
         self.last_meas = meas
         reward, terms = self.reward_fn.step(meas, self.world.true_state(), info["outcome"],
                                             info.get("touchdown"))
+        terms["veto"] = -self.veto_cost if veto else 0.0           # Step 7f press cost
+        reward += terms["veto"]
         info.update(applied=self.applied.copy(), asked=self.asked.copy(), drop=drop,
                     reward_terms=terms, **sh)
         return obs, reward, term, trunc, info
