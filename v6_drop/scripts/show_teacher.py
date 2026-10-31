@@ -129,6 +129,8 @@ def compose_frame(env, rec, outcome):
     put(left, f"pad {env.world.plat.v:3.1f} m/s   rel. speed {rec['vrel']:4.2f} m/s   tilt {rec['tilt']:4.1f} deg", 64)
     if rec.get("flag"):
         put(left, f"TROUBLE: {rec['flag']}", CHASE_H - 14, RED, 0.7)
+    if rec.get("note"):                                    # Step 8.3: drop press / shield / motors off
+        put(left, rec["note"], CHASE_H - 40, rec.get("note_color", YELLOW), 0.55)
     put(right, f"drone camera   markers seen: {n_ids}", 20, GREEN if n_ids else RED)
     if outcome is not None:
         o = outcome["outcome"]

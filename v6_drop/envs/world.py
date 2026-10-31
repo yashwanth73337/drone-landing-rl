@@ -112,6 +112,8 @@ class World:
         self.plat_half = PAD_SIZE / 2
         self.det = PB.detector()
         self.t = 0                       # decisions since reset (0.1 s each)
+        self.frame_hook = None           # Step 8.3 videos: called as hook(k) after every motors-off
+        self._off_k = 0                  # physics step; it only RENDERS, physics is unchanged
         self.done = True                 # call reset() first
 
     # ---- setup ----------------------------------------------------------------------
@@ -281,9 +283,13 @@ class World:
         self.quad.last_wrench = np.zeros(4)
         p.stepSimulation(physicsClientId=self.cid)
         self.plat.integrate()
+        self._off_k += 1
+        if self.frame_hook is not None:
+            self.frame_hook(self._off_k)
 
     def _touchdown_phase(self, reason, v_pre=None, already_touching=False):
         """Motors off; judge the landing over a SETTLE_T window (the five checks)."""
+        self._off_k = 0
         n_win = int(round(SETTLE_T / P.PHYSICS_DT))
         td = dict(reason=reason, impact=None, impact_method=None, land_xy=None,
                   tilt_max_deg=0.0, slide=None, v_rel_end=None, strict_soft=None)

@@ -5,6 +5,11 @@ move, and drop when its drop chance is above 0.5.
 Run (from the repo root; performance mode first):
   python -m v6_drop.scripts.eval_student --ckpt v6_drop/results/runs/bc256/best.pt --n 100
   python -m v6_drop.scripts.eval_student --ckpt ... --videos 9000 9001 9002 9003
+  (8.3) --shield 0.8 flies with the camera drop shield; --seed0 9500 uses the fresh test seeds;
+  --pick-from results/final_eval/test9500/flights_<student>.csv --pick drops|failures chooses
+  the video seeds (one drop per pad-speed band + the fastest pad, or up to 4 failures).
+  Videos show each drop press (ALLOWED / BLOCKED by the shield) and the motors-off fall in
+  slow motion (x10), then the 2 s landing check.
 Output: v6_drop/results/runs/<run>/exam_<n>.csv, exam_<n>_summary.txt, exam_paths.png and
         (with --videos) student_<seed>.mp4/.png. It prints nothing until each 10 episodes.
         (6d) Files of last.pt are named exam_<n>*, of any other checkpoint <stem>_exam_<n>*,
@@ -37,39 +42,76 @@ def load(ckpt, device):
     return m, ck
 
 
+def snapshot(env, phase, t):
+    """The numbers shown in a video frame / stored per step (true state, for display)."""
+    s = env.world.true_state()
+    rel = s["pad_center"] - s["pos"]
+    return dict(t=t, pos=s["pos"].copy(), pad=s["pad_center"].copy(),
+                rel_pad=env.world.plat.world_to_pad([s["pos"]])[0],
+                hf=float(s["pos"][2] - PAD_TOP_Z - P.REST_HEIGHT), d=float(np.hypot(rel[0], rel[1])),
+                phase=phase, flag="",
+                vrel=float(np.linalg.norm((s["v"] - s["pad_v"])[:2])),
+                vz_rel=float((s["v"] - s["pad_v"])[2]),
+                tilt=float(np.degrees(np.arccos(np.clip(s["R"][2, 2], -1, 1)))))
+
+
+SLOWMO_STEPS = 25              # 8.3: first 0.25 s after the motor cut, one frame per physics step
+
+
+def drop_note(env, act):
+    """8.3: what happens to a drop press (shown in the video)."""
+    if not act["drop"]:
+        return None, None
+    if env.drop_shield is None:
+        return "DROP PRESSED -> motors off", ST.GREEN
+    ok, pred, _ = env.shield_check()
+    if pred is None:
+        return "DROP PRESSED -> BLOCKED by shield (no confident marker)", ST.RED
+    if ok:
+        return f"DROP PRESSED -> ALLOWED (predicted impact {pred:.2f} m/s)", ST.GREEN
+    return f"DROP PRESSED -> BLOCKED by shield (predicted {pred:.2f} m/s > {env.drop_shield})", ST.RED
+
+
 def fly(env, model, seed, device, frames=False, drop_rule=None):
     """One exam flight. drop_rule (6d diagnostic, scripts/oracle_drop.py): an object with
     reset() and __call__(rec) -> bool that may FORCE a drop from the true state; None = the
-    student alone (the real exam)."""
+    student alone (the real exam). frames=True (8.3) also films the motors-off part: the
+    first SLOWMO_STEPS physics steps one frame each (slow motion x10), then one frame per
+    0.1 s of the 2 s landing check. Filming only renders; the flight is the same."""
     obs, info0 = env.reset(seed=seed)
     hc, log, pics = None, [], []
     if drop_rule is not None:
         drop_rule.reset()
-    while True:
-        s = env.world.true_state()
-        act, hc, p_drop = model.act(obs, hc, device)
-        rel = s["pad_center"] - s["pos"]
-        rec = dict(t=env.world.t * P.POLICY_DT, pos=s["pos"].copy(), pad=s["pad_center"].copy(),
-                   rel_pad=env.world.plat.world_to_pad([s["pos"]])[0],
-                   hf=float(s["pos"][2] - PAD_TOP_Z - P.REST_HEIGHT), d=float(np.hypot(rel[0], rel[1])),
-                   phase=f"student (drop chance {100 * p_drop:.0f}%)", flag="",
-                   vrel=float(np.linalg.norm((s["v"] - s["pad_v"])[:2])),
-                   vz_rel=float((s["v"] - s["pad_v"])[2]),
-                   tilt=float(np.degrees(np.arccos(np.clip(s["R"][2, 2], -1, 1)))))
-        if drop_rule is not None and drop_rule(rec):
-            act = dict(act, drop=1)
-            rec["forced_drop"] = True
-        if frames:
-            pics.append(ST.compose_frame(env, rec, outcome=None))
-        obs, r, term, trunc, info = env.step(act)
-        rt = info.get("reward_terms") or {}
-        rec["seen"] = rt.get("seen")
-        log.append(rec)
-        if term or trunc:
-            break
+    if frames:
+        def hook(k):
+            if k <= SLOWMO_STEPS or k % 10 == 0:
+                slow = k <= SLOWMO_STEPS
+                r = snapshot(env, "MOTORS OFF" + (" (slow motion x10)" if slow else ": 2 s landing check"),
+                             env.world.t * P.POLICY_DT + k * P.PHYSICS_DT)
+                r["note"], r["note_color"] = "motors off: falling onto the pad" if slow else None, ST.YELLOW
+                pics.append(ST.compose_frame(env, r, outcome=None))
+        env.world.frame_hook = hook
+    try:
+        while True:
+            act, hc, p_drop = model.act(obs, hc, device)
+            rec = snapshot(env, f"student (drop chance {100 * p_drop:.0f}%)", env.world.t * P.POLICY_DT)
+            if drop_rule is not None and drop_rule(rec):
+                act = dict(act, drop=1)
+                rec["forced_drop"] = True
+            if frames:
+                rec["note"], rec["note_color"] = drop_note(env, act)
+                pics.append(ST.compose_frame(env, rec, outcome=None))
+            obs, r, term, trunc, info = env.step(act)
+            rt = info.get("reward_terms") or {}
+            rec["seen"] = rt.get("seen")
+            log.append(rec)
+            if term or trunc:
+                break
+    finally:
+        env.world.frame_hook = None
     if frames:
         s = env.world.true_state()
-        pics += [ST.compose_frame(env, dict(log[-1], pos=s["pos"].copy()), outcome=info)] * 20
+        pics += [ST.compose_frame(env, dict(log[-1], pos=s["pos"].copy(), note=None), outcome=info)] * 20
     return log, info, info0, pics
 
 
@@ -105,6 +147,7 @@ def exam(model, ckpt, n, device, seed0=9000, shield=None):
     out = os.path.dirname(os.path.abspath(ckpt))
     stem = os.path.splitext(os.path.basename(ckpt))[0]
     pre = ("" if stem == "last" else stem + "_") + ("" if shield is None else f"shield{round(100 * shield)}_")
+    pre += "" if seed0 == 9000 else f"seeds{seed0}_"               # 8.3: fresh seeds never overwrite dev files
     kw = {} if shield is None else dict(drop_shield=shield)      # no shield = the old call exactly
     env = E.LandingEnv(renderer="egl", seed=0, **kw)
     rows, paths, t0 = [], [], time.time()
@@ -179,13 +222,35 @@ def exam(model, ckpt, n, device, seed0=9000, shield=None):
     plt.close(fig)
 
 
-def videos(model, ckpt, seeds, device):
+def pick_seeds(csv_path, kind):
+    """8.3: choose video seeds from a final_eval flights_<student>.csv.
+    kind 'drops': the first DROP landing in each pad-speed band + the fastest pad;
+    kind 'failures': up to 4 flights that were not safe."""
+    rows = list(csv.DictReader(open(csv_path)))
+    if kind == "failures":
+        return [int(r["seed"]) for r in rows if r["outcome"] != "success"][:4]
+    seeds = []
+    for lo_v, hi_v in ((0, 1), (1, 2), (2, 3), (3, 4.01)):
+        for r in rows:
+            if lo_v <= float(r["pad_speed"]) < hi_v and r["outcome"] == "success" and r["reason"] == "drop":
+                seeds.append(int(r["seed"]))
+                break
+    fast = max(rows, key=lambda r: float(r["pad_speed"]))
+    if int(fast["seed"]) not in seeds:
+        seeds.append(int(fast["seed"]))
+    return seeds
+
+
+def videos(model, ckpt, seeds, device, shield=None):
     out = os.path.dirname(os.path.abspath(ckpt))
-    env = E.LandingEnv(renderer="egl", seed=0)
+    stem = os.path.splitext(os.path.basename(ckpt))[0]
+    pre = ("" if stem == "last" else stem + "_") + ("" if shield is None else f"shield{round(100 * shield)}_")
+    kw = {} if shield is None else dict(drop_shield=shield)
+    env = E.LandingEnv(renderer="egl", seed=0, **kw)
     try:
         for seed in seeds:
             log, info, info0, frames = fly(env, model, seed, device, frames=True)
-            base = os.path.join(out, f"student_{seed}")
+            base = os.path.join(out, f"{pre}student_{seed}")
             ST.write_video(frames, base + ".mp4")
             ST.plot_episode(log, info, seed, info0["pad_speed"], base + ".png", title="Student")
             print(f"[video] seed {seed}: pad {info0['pad_speed']:.2f} m/s, {info['outcome']} -> {base}.mp4/.png",
@@ -201,14 +266,20 @@ def main():
     ap.add_argument("--videos", type=int, nargs="*", default=None)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--shield", type=float, default=None, help="drop shield limit, m/s (Step 7e: 0.8)")
+    ap.add_argument("--seed0", type=int, default=9000, help="first exam seed (8.3: 9500 = fresh test seeds)")
+    ap.add_argument("--pick-from", default=None, help="8.3: final_eval flights_<student>.csv to choose video seeds")
+    ap.add_argument("--pick", choices=["drops", "failures"], default="drops")
     a = ap.parse_args()
     model, ck = load(a.ckpt, a.device)
     when = f"epoch {ck['epoch']}" if "epoch" in ck else f"PPO round {ck.get('round')}"   # 7e: PPO files
     print(f"[exam] loaded {a.ckpt} ({when}, size {ck['size']})", flush=True)
+    if a.pick_from:
+        a.videos = pick_seeds(a.pick_from, a.pick)
+        print(f"[video] picked seeds ({a.pick}): {a.videos}", flush=True)
     if a.videos:
-        videos(model, a.ckpt, a.videos, a.device)
+        videos(model, a.ckpt, a.videos, a.device, shield=a.shield)
     else:
-        exam(model, a.ckpt, a.n, a.device, shield=a.shield)
+        exam(model, a.ckpt, a.n, a.device, seed0=a.seed0, shield=a.shield)
 
 
 if __name__ == "__main__":
