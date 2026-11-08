@@ -23,6 +23,18 @@ C1 rules (decided 28 Oct):
     4 centre stays over the pad              else slide_off
     5 |v_rel| <= 0.1 m/s at the end          else not_still
     all five pass -> success (= a SAFE landing). impact <= 0.5 m/s is reported too.
+  T1 (7 Nov): touch="sensor" replaces (b) by the drone's own TOUCH DETECTOR
+  (touch_detector.py: camera feet height + own vertical speed, held 0.1 s). The drone may
+  touch, sit or bounce with the motors on until its detector fires. The REFEREE (this file)
+  still uses the true contact list, but only to JUDGE: it reads the impact speed at every
+  new touch of the pad top (hard_landing at once if > 1.0, reason "touch"), and the landing
+  checks start when the motors go off (reason "touch_detect"). A detector firing with no
+  contact and NO touch before is a FALSE ALARM: the drone falls and the fall is judged.
+  Firing with no contact AFTER a touch (a small hop) is reported as fired_in_hop (T2: the
+  T1 exam counted those 2 hops as false alarms by mistake). A touch the detector
+  never confirms is a MISSED touch (motors stay on; the student may still drop; else
+  timeout). info["touch"] reports touches, delay, impact. touch="perfect" (default) is the
+  old auto-cut, unchanged, so all earlier results stay reproducible.
   Impact speed: after a drop only gravity acts, so it is computed EXACTLY by energy
   conservation from the state at the drop: v_touch = sqrt(vz0^2 + 2 g gap0) (D4). For an
   auto-cut touch (thrust on until the touch) the per-step reading is used (+-0.1 m/s).
@@ -58,6 +70,7 @@ from .camera import Camera
 from .platform_s1 import PAD_SIZE, PAD_TOP_Z, set_contact_friction
 from .quad import LMF2Quad, MotorModel, make_client
 from .lee_controller import LeeVelocityController
+from .touch_detector import TouchDetector
 
 # ---- Stage 1 start rules ---------------------------------------------------------
 H_RANGE = (2.0, 5.0)               # m, drone centre above the pad top
@@ -80,6 +93,7 @@ V_IMPACT_MAX = 1.0                 # m/s, impact speed relative to the pad
 V_IMPACT_STRICT = 0.5              # m/s, stricter extra metric (reported only)
 TILT_LAND_MAX = np.radians(30.0)
 V_STILL = 0.1                      # m/s, |v_drone - v_pad| at the end of the window
+TOUCH_MODES = ("perfect", "sensor")   # T1: old auto-cut / the drone's own touch detector
 OUTCOMES = ("success", "hard_landing", "tip_over", "slide_off", "not_still",
             "crash_platform", "crash_ground", "flip", "lost", "timeout")
 
@@ -92,7 +106,9 @@ def euler_R(roll, pitch, yaw):
 class World:
     _egl_open = 0                        # EGL Worlds currently open in this process
 
-    def __init__(self, renderer="egl", layout=PB.DEFAULT_LAYOUT, seed=0, gains_mode="random"):
+    def __init__(self, renderer="egl", layout=PB.DEFAULT_LAYOUT, seed=0, gains_mode="random",
+                 touch="perfect", touch_cfg=None):
+        assert touch in TOUCH_MODES, touch
         if renderer == "egl" and World._egl_open > 0:
             raise RuntimeError("an EGL World is already open in this process; "
                                "use one EGL World per process (see world.py header)")
@@ -115,6 +131,11 @@ class World:
         self.frame_hook = None           # Step 8.3 videos: called as hook(k) after every motors-off
         self._off_k = 0                  # physics step; it only RENDERS, physics is unchanged
         self.done = True                 # call reset() first
+        self.touch = touch               # T1: "perfect" (old auto-cut) or "sensor"
+        self.detector = TouchDetector(**(touch_cfg or {})) if touch == "sensor" else None
+        self._k = 0                      # physics steps since reset (T1 referee clock)
+        self._tr = None                  # T1 referee record of true touches (sensor mode)
+        self._on_pad = False
 
     # ---- setup ----------------------------------------------------------------------
     def _seed_streams(self, seed):
@@ -198,10 +219,21 @@ class World:
         p.performCollisionDetection(physicsClientId=self.cid)
         self.t = 0
         self.done = False
+        self._k = 0
+        self._on_pad = False
+        self._tr = dict(touches=0, first_k=None, impact_max=None)
+        if self.detector is not None:
+            self.detector.reset()
         if img is None:
             img = self.render()
             meas = PB.measure(img, self.cam, self.layout, self.det)
         return dict(image=img, spawn=spawn, measurement=meas, tries=tries)
+
+    def set_camera_feet(self, feet):
+        """T1: the latest camera frame's feet height above the pad top (m; None = no confident
+        measurement). LandingEnv calls this after every frame. Ignored in 'perfect' mode."""
+        if self.detector is not None:
+            self.detector.set_camera(feet)
 
     # ---- one decision ----------------------------------------------------------------
     def step(self, cmd, drop=False):
@@ -217,15 +249,34 @@ class World:
             self.quad.apply_control(cmd)
             p.stepSimulation(physicsClientId=self.cid)
             self.plat.integrate()
+            self._k += 1
             kind = self._contact_kind()
-            if kind == "top":                                      # AUTO-CUT (Option A)
+            if kind == "top" and self.touch == "perfect":          # AUTO-CUT (Option A, old)
                 info = self._touchdown_phase(reason="auto_cut", v_pre=v_pre, already_touching=True)
                 return self._finish(info, truncated=False)
             if kind in ("ground", "side"):
                 return self._finish(self._flight_end("crash_ground" if kind == "ground"
                                                      else "crash_platform"), truncated=False)
+            if self.touch == "sensor":                             # T1 referee: true touches
+                if kind == "top":
+                    if not self._on_pad:                           # a NEW touch of the pad top
+                        imp = float(max(0.0, -(v_pre[2] - self.plat.velocity()[2])))
+                        tr = self._tr
+                        tr["touches"] += 1
+                        if tr["first_k"] is None:
+                            tr["first_k"] = self._k
+                        tr["impact_max"] = imp if tr["impact_max"] is None else max(tr["impact_max"], imp)
+                        if imp > V_IMPACT_MAX:                     # too hard: ends at impact
+                            return self._finish(self._hard_touch(imp), truncated=False)
+                    self._on_pad = True
+                else:
+                    self._on_pad = False
             if self._tilt() > TILT_FLIGHT_MAX:
                 return self._finish(self._flight_end("flip"), truncated=False)
+            if self.touch == "sensor" and self.detector.update(self.quad.state()["v"][2]):
+                info = self._touchdown_phase(reason="touch_detect", v_pre=v_pre,
+                                             already_touching=(kind == "top"))
+                return self._finish(info, truncated=False)
         self.t += 1
         s = self.true_state()
         rel = s["pos"] - s["pad_center"]
@@ -239,7 +290,26 @@ class World:
     def _finish(self, info, truncated):
         self.done = True
         info["t"] = self.t
+        if self.touch == "sensor":                                 # T1 report (sensor mode only)
+            tr = self._tr
+            info["touch"] = dict(touches=tr["touches"],
+                                 first_touch_s=None if tr["first_k"] is None else tr["first_k"] * P.PHYSICS_DT,
+                                 impact_max=tr["impact_max"],
+                                 missed=bool(tr["touches"] > 0 and (info.get("touchdown") or {}).get("reason")
+                                             not in ("touch_detect", "drop", "touch")),
+                                 detector=self.detector.config())
         return (not truncated), truncated, info
+
+    def _hard_touch(self, imp):
+        """T1 referee: a touch harder than V_IMPACT_MAX ends the episode at the impact, as the
+        old auto-cut did (motors were still on: the drone did not cut yet)."""
+        s = self.true_state()
+        td = dict(reason="touch", impact=imp, impact_method="step_reading",
+                  land_xy=self.plat.world_to_pad([s["pos"]])[0].tolist(), tilt_max_deg=0.0,
+                  slide=None, v_rel_end=None, strict_soft=False,
+                  cut_s=None, detect_delay_s=None, false_alarm=False, fired_in_hop=False,
+                  touched_before_cut=True, cam_age_s=None)
+        return dict(outcome="hard_landing", touchdown=td)
 
     def _flight_end(self, outcome, count_step=True):
         if count_step:
@@ -293,8 +363,23 @@ class World:
         n_win = int(round(SETTLE_T / P.PHYSICS_DT))
         td = dict(reason=reason, impact=None, impact_method=None, land_xy=None,
                   tilt_max_deg=0.0, slide=None, v_rel_end=None, strict_soft=None)
+        sensor = self.touch == "sensor"
+        prior = self._tr["impact_max"] if (sensor and self._tr is not None) else None
+        if sensor:                                 # T1: when and how the motors went off
+            first_k = self._tr["first_k"]
+            td.update(cut_s=self._k * P.PHYSICS_DT,
+                      detect_delay_s=None if first_k is None else (self._k - first_k) * P.PHYSICS_DT,
+                      false_alarm=bool(reason == "touch_detect" and not already_touching
+                                       and first_k is None),
+                      fired_in_hop=bool(reason == "touch_detect" and not already_touching
+                                        and first_k is not None),
+                      touched_before_cut=first_k is not None,
+                      cam_age_s=self.detector.age * P.PHYSICS_DT if reason == "touch_detect" else None)
         k0 = 0
-        if already_touching:                       # auto-cut: contact happened this substep
+        if already_touching and sensor:            # T1: cut while sitting on the pad: the
+            first = "top"                          # impact is the referee's touch reading
+            td["impact"], td["impact_method"] = float(prior), "step_reading"
+        elif already_touching:                     # auto-cut: contact happened this substep
             first = "top"
             vz_rel = v_pre[2] - self.plat.velocity()[2]
             td["impact"], td["impact_method"] = float(max(0.0, -vz_rel)), "step_reading"
@@ -318,6 +403,9 @@ class World:
                     break
             if first is None:                      # (cannot happen within 2 s near the pad)
                 return dict(outcome="crash_ground", touchdown=td)
+            if prior is not None and first == "top" and prior > td["impact"]:
+                td["impact"], td["impact_method"] = float(prior), "step_reading"   # T1: an earlier
+                                                   # touch (bounce, or sitting before a drop) was harder
         s = self.true_state()
         land_xy = self.plat.world_to_pad([s["pos"]])[0]
         td["land_xy"] = land_xy.tolist()

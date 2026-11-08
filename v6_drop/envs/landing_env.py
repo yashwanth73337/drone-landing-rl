@@ -38,6 +38,12 @@ physics check on ONBOARD data predicts a safe impact:
   pred = sqrt(sink^2 + 2 g h) <= L     (same formula as the safe30m gate; L = 0.8 there)
 No confident measurement -> no drop. A blocked drop = the drone keeps flying this step
 (drop = 0); info: drop_requested, shield_veto, shield_pred (m/s), shield_feet (m).
+
+TOUCH mode (T1, 7 Nov): touch="perfect" (default) = the old simulator auto-cut on touch;
+touch="sensor" = the drone's own touch detector (envs/touch_detector.py). After every camera
+frame this env gives the world the frame's feet height (cam_feet: last confident ArUco +
+solvePnP measurement + own orientation, the same geometry as the shield; None if not
+confident). headless=True has no frames, so the detector cannot fire there.
 drop_shield=None (default) = no shield, exactly the old behaviour.
 
 Press cost (Step 7f, decided 31 Oct, F1; the 'punish the learner when the shield steps
@@ -82,7 +88,8 @@ class LandingEnv(gym.Env):
     metadata = {"render_modes": []}
 
     def __init__(self, renderer="egl", seed=0, gains_mode="random", layout=PB.DEFAULT_LAYOUT,
-                 reward_source="camera", headless=False, drop_shield=None, veto_cost=0.0):
+                 reward_source="camera", headless=False, drop_shield=None,
+                 touch="perfect", touch_cfg=None, veto_cost=0.0):
         """headless=True (Step 6): no camera image per step (blank image), reward 0 and
         info['reward_terms'] None. ONLY for fast teacher evaluation; never for training.
         Episode starts still use the camera (start rule: >= 1 marker detected)."""
@@ -94,7 +101,8 @@ class LandingEnv(gym.Env):
         assert self.veto_cost >= 0.0
         self.last_meas = None                      # measurement of the frame the policy sees
         self.reward_fn = Reward(reward_source)
-        self.world = World(renderer=renderer, layout=layout, seed=seed, gains_mode=gains_mode)
+        self.world = World(renderer=renderer, layout=layout, seed=seed, gains_mode=gains_mode,
+                           touch=touch, touch_cfg=touch_cfg)
         f32 = np.float32
         self.observation_space = spaces.Dict({
             "image": spaces.Box(0, 255, (OBS_H, OBS_W), np.uint8),
@@ -140,9 +148,18 @@ class LandingEnv(gym.Env):
         self.asked = self.applied.copy()
         self.reward_fn.reset(out["measurement"], s)
         self.last_meas = out["measurement"]
+        self.world.set_camera_feet(self.cam_feet(out["measurement"]))       # T1
         info = dict(spawn=out["spawn"], tries=out["tries"], pad_speed=self.world.plat.v,
                     start_marker_ids=list(out["measurement"].ids))
         return self._obs(out["image"]), info
+
+    def cam_feet(self, m):
+        """T1: feet height above the pad top (m) from a camera measurement and the drone's
+        own orientation; None if the measurement is not confident."""
+        if m is None or not (m.ok and m.confident):
+            return None
+        _, h = geometry_from_body(m.p_body, self.world.true_state()["R"])
+        return float(h - P.REST_HEIGHT)
 
     def shield_check(self):
         """(allowed, predicted impact m/s or None, feet height m or None) from onboard data
@@ -172,6 +189,7 @@ class LandingEnv(gym.Env):
         term, trunc, info = self.world.step(self.applied.copy(), drop=drop)
         if self.headless:
             obs = self._obs(np.zeros((self.world.cam.h, self.world.cam.w), np.uint8))
+            self.world.set_camera_feet(None)                                # T1: no frames
             info.update(applied=self.applied.copy(), asked=self.asked.copy(), drop=drop,
                         reward_terms=None, **sh)
             return obs, 0.0, term, trunc, info
@@ -181,6 +199,7 @@ class LandingEnv(gym.Env):
         if info["outcome"] is None:                        # no camera reward after the end
             meas = PB.measure(img, self.world.cam, self.world.layout, self.world.det)
         self.last_meas = meas
+        self.world.set_camera_feet(self.cam_feet(meas))                     # T1
         reward, terms = self.reward_fn.step(meas, self.world.true_state(), info["outcome"],
                                             info.get("touchdown"))
         terms["veto"] = -self.veto_cost if veto else 0.0           # Step 7f press cost

@@ -14,6 +14,14 @@ Output: v6_drop/results/runs/<run>/exam_<n>.csv, exam_<n>_summary.txt, exam_path
         (with --videos) student_<seed>.mp4/.png. It prints nothing until each 10 episodes.
         (6d) Files of last.pt are named exam_<n>*, of any other checkpoint <stem>_exam_<n>*,
         so exams of best.pt and last.pt no longer overwrite each other.
+T1 (7 Nov): --touch sensor flies with the drone's own touch detector instead of the
+simulator's perfect auto-cut (--touch-hold N: physics steps the rule must hold, default 10 =
+0.1 s). Files get the prefix touch<N>_ ; the csv gets touches, missed, false_alarm,
+detect_delay_s, touch_impact_max; the summary adds lines on touches, delays, misses and
+false alarms. Without --touch (= perfect) every output is exactly as before.
+T2 (7 Nov): csv also fired_in_hop, touched_before_cut, cam_age_s; summary splits drops into
+'from the air' and 'after a touch', counts false alarms only with no touch before (hops after
+a touch are counted apart) and counts detector cuts that used a carried-forward camera value.
 Drop-gate lines (6d, 29 Oct): per flight, the longest run of steps meeting the teacher's
 drop gate (true state, teacher's constants), and the longest stay in the 2-4 cm window
 with the sinking speed there. These show progress towards DROPPING before drops happen.
@@ -140,7 +148,14 @@ def wilson(k, n, z=1.96):
     return 100 * (c - hw), 100 * (c + hw)
 
 
-def exam(model, ckpt, n, device, seed0=9000, shield=None):
+def touch_kw(touch, hold):
+    """T1: extra LandingEnv arguments and the file prefix. perfect -> nothing (old call)."""
+    if touch == "perfect":
+        return {}, ""
+    return dict(touch="sensor", touch_cfg=dict(hold_steps=hold)), f"touch{hold}_"
+
+
+def exam(model, ckpt, n, device, seed0=9000, shield=None, touch="perfect", hold=10):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -149,6 +164,9 @@ def exam(model, ckpt, n, device, seed0=9000, shield=None):
     pre = ("" if stem == "last" else stem + "_") + ("" if shield is None else f"shield{round(100 * shield)}_")
     pre += "" if seed0 == 9000 else f"seeds{seed0}_"               # 8.3: fresh seeds never overwrite dev files
     kw = {} if shield is None else dict(drop_shield=shield)      # no shield = the old call exactly
+    tkw, tpre = touch_kw(touch, hold)
+    kw.update(tkw)
+    pre = tpre + pre
     env = E.LandingEnv(renderer="egl", seed=0, **kw)
     rows, paths, t0 = [], [], time.time()
     try:
@@ -159,6 +177,14 @@ def exam(model, ckpt, n, device, seed0=9000, shield=None):
                              time_s=round(len(log) * P.POLICY_DT, 1), reason=td.get("reason"),
                              impact=None if td.get("impact") is None else round(td["impact"], 3),
                              offset_cm=None if not td.get("land_xy") else round(100 * float(np.linalg.norm(td["land_xy"])), 1)))
+            if touch == "sensor":                                  # T1 columns
+                tc = info.get("touch") or {}
+                rows[-1].update(touches=tc.get("touches"), missed=tc.get("missed"),
+                                false_alarm=td.get("false_alarm"), fired_in_hop=td.get("fired_in_hop"),
+                                touched_before_cut=td.get("touched_before_cut"),
+                                cam_age_s=None if td.get("cam_age_s") is None else round(td["cam_age_s"], 2),
+                                detect_delay_s=None if td.get("detect_delay_s") is None else round(td["detect_delay_s"], 2),
+                                touch_impact_max=None if tc.get("impact_max") is None else round(tc["impact_max"], 3))
             g_run, w_stay, w_sink = gate_stats(log)
             rows[-1].update(gate_run=g_run, window_stay=w_stay,
                             window_sink=None if w_sink is None else round(w_sink, 3))
@@ -187,7 +213,8 @@ def exam(model, ckpt, n, device, seed0=9000, shield=None):
         off = np.array([r["offset_cm"] for r in ok])
         tim = np.array([r["time_s"] for r in ok])
         lines += [f"landed by drop: {sum(r['reason'] == 'drop' for r in ok)}, by auto-cut: "
-                  f"{sum(r['reason'] == 'auto_cut' for r in ok)}",
+                  f"{sum(r['reason'] == 'auto_cut' for r in ok)}"
+                  + ("" if touch == "perfect" else f", by touch detector: {sum(r['reason'] == 'touch_detect' for r in ok)}"),
                   f"impact [m/s] (safe ones): mean {imp.mean():.2f}, max {imp.max():.2f}",
                   f"distance from the centre [cm]: mean {off.mean():.1f}, max {off.max():.1f}",
                   f"time to land [s]: mean {tim.mean():.1f}, max {tim.max():.1f}"]
@@ -197,6 +224,22 @@ def exam(model, ckpt, n, device, seed0=9000, shield=None):
         if rs:
             by_speed.append(f"{lo_v}-{int(hi_v)} m/s: {sum(r['outcome'] == 'success' for r in rs)}/{len(rs)}")
     lines.append("safe by pad speed: " + ", ".join(by_speed))
+    if touch == "sensor":                                          # T1 lines
+        det = [r for r in rows if r["reason"] == "touch_detect"]
+        dl = [r["detect_delay_s"] for r in det if r["detect_delay_s"] is not None]
+        lines.append(f"touch detector (hold {hold} steps = {hold * P.PHYSICS_DT:.2f} s): fired in {len(det)} flights "
+                     f"({sum(r['outcome'] == 'success' for r in det)} safe); flights with >= 1 touch "
+                     f"{sum((r['touches'] or 0) > 0 for r in rows)}; missed touches {sum(bool(r['missed']) for r in rows)}; "
+                     f"false alarms {sum(bool(r['false_alarm']) for r in rows)}; hard touches (> 1.0 m/s) "
+                     f"{sum(r['reason'] == 'touch' for r in rows)}")
+        if dl:
+            lines.append(f"  delay from the first touch to motors off [s]: median {np.median(dl):.2f}, "
+                         f"max {max(dl):.2f}")
+        dr = [r for r in rows if r["reason"] == "drop"]
+        lines.append(f"  drops from the air: {sum(not r['touched_before_cut'] for r in dr)}, drops after a touch: "
+                     f"{sum(bool(r['touched_before_cut']) for r in dr)}; detector fired in a hop after a touch: "
+                     f"{sum(bool(r['fired_in_hop']) for r in rows)}; detector cuts using a carried-forward "
+                     f"camera value (camera blind > 0.1 s): {sum((r['cam_age_s'] or 0) > 0.1 + 1e-9 for r in det)}")
     reached = [r for r in rows if r["window_stay"] > 0]
     lines.append(f"drop gate held >= {T.HOLD_STEPS} steps: {sum(r['gate_run'] >= T.HOLD_STEPS for r in rows)}/{n} flights; "
                  f"2-4 cm window reached in {len(reached)}/{n}")
@@ -241,11 +284,14 @@ def pick_seeds(csv_path, kind):
     return seeds
 
 
-def videos(model, ckpt, seeds, device, shield=None):
+def videos(model, ckpt, seeds, device, shield=None, touch="perfect", hold=10):
     out = os.path.dirname(os.path.abspath(ckpt))
     stem = os.path.splitext(os.path.basename(ckpt))[0]
     pre = ("" if stem == "last" else stem + "_") + ("" if shield is None else f"shield{round(100 * shield)}_")
     kw = {} if shield is None else dict(drop_shield=shield)
+    tkw, tpre = touch_kw(touch, hold)
+    kw.update(tkw)
+    pre = tpre + pre
     env = E.LandingEnv(renderer="egl", seed=0, **kw)
     try:
         for seed in seeds:
@@ -269,6 +315,9 @@ def main():
     ap.add_argument("--seed0", type=int, default=9000, help="first exam seed (8.3: 9500 = fresh test seeds)")
     ap.add_argument("--pick-from", default=None, help="8.3: final_eval flights_<student>.csv to choose video seeds")
     ap.add_argument("--pick", choices=["drops", "failures"], default="drops")
+    ap.add_argument("--touch", choices=["perfect", "sensor"], default="perfect",
+                    help="T1: perfect = old simulator auto-cut; sensor = the drone's own touch detector")
+    ap.add_argument("--touch-hold", type=int, default=10, help="T1: physics steps the touch rule must hold")
     a = ap.parse_args()
     model, ck = load(a.ckpt, a.device)
     when = f"epoch {ck['epoch']}" if "epoch" in ck else f"PPO round {ck.get('round')}"   # 7e: PPO files
@@ -277,9 +326,9 @@ def main():
         a.videos = pick_seeds(a.pick_from, a.pick)
         print(f"[video] picked seeds ({a.pick}): {a.videos}", flush=True)
     if a.videos:
-        videos(model, a.ckpt, a.videos, a.device, shield=a.shield)
+        videos(model, a.ckpt, a.videos, a.device, shield=a.shield, touch=a.touch, hold=a.touch_hold)
     else:
-        exam(model, a.ckpt, a.n, a.device, seed0=a.seed0, shield=a.shield)
+        exam(model, a.ckpt, a.n, a.device, seed0=a.seed0, shield=a.shield, touch=a.touch, hold=a.touch_hold)
 
 
 if __name__ == "__main__":
