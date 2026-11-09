@@ -28,6 +28,16 @@ Report (E3), results/final_eval/<tag>/:
                           paired flight-time difference with a 95% CI
   compare.png             safe %, drop % (with CIs) and time per student
 
+Touch detector (T5, 9 Nov): --touch sensor flies every student with the drone's own touch
+detector (envs/touch_detector.py; --touch-hold N, default 10 = 0.1 s) instead of the
+simulator's perfect auto-cut. The summary then adds per student: air drops % [CI] (no foot
+touched before the cut), drops after a touch, detector cuts, slow (> 0.5 s from the first
+touch to motors off = touch-and-go), missed touches, false alarms, delay median/max; the
+pair lines add a McNemar test on AIR drops. --pairs a,b ... chooses the pairs (default the
+Step 8 pairs). Without --touch everything is exactly as in Step 8.
+NOTE: seeds 9500-9999 were used once (Step 8, 31 Oct). Re-running them for the changed
+system is a SECOND use: say so in the paper.
+
 Run (from the repo root; AC power + performance mode first):
   nohup python -m v6_drop.scripts.final_eval --tag test9500 --n 500 --seed0 9500 --workers 12 \\
         > v6_drop/results/final_eval_test9500.log 2>&1 &
@@ -111,7 +121,19 @@ def describe(rows):
         bands.append(dict(band=f"{lo}-{int(hi)}", n=len(rb), safe=sum(r["outcome"] == "success" for r in rb),
                           drop=sum(r["outcome"] == "success" and r["reason"] == "drop" for r in rb)))
     q = lambda a, p: float(np.percentile(a, p)) if len(a) else float("nan")
-    return dict(n=n, safe=len(ok), drop=len(drops), auto_cut=len(ok) - len(drops), outcomes=outs,
+    touch = None
+    if rows and "touches" in rows[0]:                       # T5: sensor mode only
+        air = [r for r in drops if not r["touched_before_cut"]]
+        dl = [r["detect_delay_s"] for r in rows if r["reason"] == "touch_detect" and r["detect_delay_s"] is not None]
+        touch = dict(air=len(air), air_ci=wilson(len(air), n), after=len(drops) - len(air),
+                     detector=sum(r["reason"] == "touch_detect" for r in ok),
+                     slow=sum((r["detect_delay_s"] or 0) > 0.5 for r in rows),
+                     missed=sum(bool(r["missed"]) for r in rows),
+                     false_alarm=sum(bool(r["false_alarm"]) for r in rows),
+                     hard_touch=sum(r["reason"] == "touch" for r in rows),
+                     delay_med=float(np.median(dl)) if dl else float("nan"),
+                     delay_max=float(max(dl)) if dl else float("nan"))
+    return dict(n=n, safe=len(ok), drop=len(drops), auto_cut=len(ok) - len(drops), outcomes=outs, touch=touch,
                 safe_ci=wilson(len(ok), n), drop_ci=wilson(len(drops), n),
                 fail_bound=rule_of_three(n) if len(ok) == n else None,
                 impact_mean=float(imp.mean()) if len(imp) else float("nan"), impact_p95=q(imp, 95),
@@ -123,16 +145,17 @@ def describe(rows):
 
 
 # ------------------------------------------------------------------ flying
-def worker(w, tasks, students, renderer, q):
+def worker(w, tasks, students, renderer, q, touch="perfect", touch_hold=10):
     import torch
     torch.set_num_threads(1)
     from v6_drop.envs import landing_env as E
     from v6_drop.scripts.dice_exam import fly_dice, sigma_norm
     from v6_drop.scripts.eval_student import load
+    from v6_drop.scripts.train_ppo import touch_kw
     models = {name: load(ck, "cpu")[0] for name, ck, _ in students}
     shields = {name: sh for name, _, sh in students}
     sig_n = sigma_norm()
-    env = E.LandingEnv(renderer=renderer, seed=0)
+    env = E.LandingEnv(renderer=renderer, seed=0, **touch_kw(touch, touch_hold))
     rows, t0 = [], time.time()
     try:
         for j, (name, seed) in enumerate(tasks):
@@ -163,12 +186,13 @@ def parse_students(items, runs_root):
     return out
 
 
-def report(by, students, pairs, out, seeds):
+def report(by, students, pairs, out, seeds, touch="perfect", hold=10):
     names = [n for n, _, _ in students]
     D = {n: describe(by[n]) for n in names}
     f = lambda x, s="{:.2f}": "-" if x is None or (isinstance(x, float) and math.isnan(x)) else s.format(x)
     L = [f"FINAL EVALUATION: {len(names)} students x {len(seeds)} fresh seeds ({seeds[0]}..{seeds[-1]}), "
-         f"clean flights, CPU, same seeds for all", ""]
+         f"clean flights, CPU, same seeds for all"
+         + ("" if touch == "perfect" else f"; ONBOARD TOUCH DETECTOR (hold {hold} steps = {hold / 100:.2f} s)"), ""]
     L.append(f"{'student':18s} {'shield':6s} {'safe % [95% CI]':22s} {'drop % [95% CI]':22s} {'hard':>4s} "
              f"{'timeout':>7s} {'other':>5s} {'impact mean/p95':>15s} {'offset cm':>9s} {'time s':>6s}")
     for n, ck, sh in students:
@@ -194,7 +218,15 @@ def report(by, students, pairs, out, seeds):
               f"offset mean {f(d['offset_mean'], '{:.1f}')}, p95 {f(d['offset_p95'], '{:.1f}')} cm",
               f"time mean {d['time_mean']:.2f} s (safe flights {f(d['time_safe'])} s); shield vetoes {d['vetoes']}",
               "by pad speed (m/s): " + ", ".join(f"{b['band']}: safe {b['safe']}/{b['n']}, drop {b['drop']}"
-                                                  for b in d["bands"]), ""]
+                                                  for b in d["bands"])]
+        tc = d["touch"]
+        if tc is not None:                                   # T5 lines
+            L += [f"touch detector: air drops {tc['air']} = {100 * tc['air'] / d['n']:.1f}% "
+                  f"[{tc['air_ci'][0]:.1f}-{tc['air_ci'][1]:.1f}], drops after a touch {tc['after']}, "
+                  f"detector cuts {tc['detector']}, slow (> 0.5 s, touch-and-go) {tc['slow']}, "
+                  f"missed {tc['missed']}, false alarms {tc['false_alarm']}, hard touches {tc['hard_touch']}; "
+                  f"detector delay median {f(tc['delay_med'])}, max {f(tc['delay_max'])} s"]
+        L.append("")
     L.append("PAIRED COMPARISONS (same seeds; McNemar exact: only seeds where the two disagree count)")
     for a, b in pairs:
         if a not in by or b not in by:
@@ -206,9 +238,14 @@ def report(by, students, pairs, out, seeds):
         dd = mcnemar([r["outcome"] == "success" and r["reason"] == "drop" for r in ra],
                      [r["outcome"] == "success" and r["reason"] == "drop" for r in rb])
         t = paired_diff([r["time_s"] for r in ra], [r["time_s"] for r in rb])
-        L.append(f"{a} -> {b}: safe only-{a} {s[0]}, only-{b} {s[1]}, p = {s[2]:.2g} | "
-                 f"drop only-{a} {dd[0]}, only-{b} {dd[1]}, p = {dd[2]:.2g} | "
-                 f"time {b} - {a} = {t[0]:+.2f} s [{t[1]:+.2f}, {t[2]:+.2f}]")
+        line = (f"{a} -> {b}: safe only-{a} {s[0]}, only-{b} {s[1]}, p = {s[2]:.2g} | "
+                f"drop only-{a} {dd[0]}, only-{b} {dd[1]}, p = {dd[2]:.2g} | "
+                f"time {b} - {a} = {t[0]:+.2f} s [{t[1]:+.2f}, {t[2]:+.2f}]")
+        if "touches" in ra[0] and "touches" in rb[0]:        # T5: air drops
+            air = lambda r: r["outcome"] == "success" and r["reason"] == "drop" and not r["touched_before_cut"]
+            ad = mcnemar([air(r) for r in ra], [air(r) for r in rb])
+            line += f" | air drop only-{a} {ad[0]}, only-{b} {ad[1]}, p = {ad[2]:.2g}"
+        L.append(line)
     txt = "\n".join(L) + "\n"
     open(os.path.join(out, "summary.txt"), "w").write(txt)
     print(txt, flush=True)
@@ -257,6 +294,10 @@ def main(argv=None):
     ap.add_argument("--out-root", default=OUT)
     ap.add_argument("--students", nargs="*", default=None, help="name=ckpt[:shield] (default: the 7 of E1)")
     ap.add_argument("--force", action="store_true", help="only to redo a CRASHED run")
+    ap.add_argument("--touch", choices=["perfect", "sensor"], default="perfect",
+                    help="T5: perfect = old simulator auto-cut; sensor = the drone's own touch detector")
+    ap.add_argument("--touch-hold", type=int, default=10, help="T5: physics steps the touch rule must hold")
+    ap.add_argument("--pairs", nargs="*", default=None, help="T5: a,b pairs for McNemar (default: Step 8 pairs)")
     a = ap.parse_args(argv)
     students = parse_students(a.students, a.runs_root)
     missing = [ck for _, ck, _ in students if not os.path.exists(ck)]
@@ -269,11 +310,13 @@ def main(argv=None):
     os.makedirs(out, exist_ok=True)
     seeds = list(range(a.seed0, a.seed0 + a.n))
     tasks = [(name, s) for s in seeds for name, _, _ in students]
-    print(f"[final] {len(students)} students x {a.n} seeds = {len(tasks)} flights, {a.workers} workers", flush=True)
+    print(f"[final] {len(students)} students x {a.n} seeds = {len(tasks)} flights, {a.workers} workers, "
+          f"touch {a.touch}" + ("" if a.touch == "perfect" else f" (hold {a.touch_hold})"), flush=True)
     ctx = mp.get_context("spawn")
     q = ctx.Queue()
     t0 = time.time()
-    procs = [ctx.Process(target=worker, args=(w, tasks[w::a.workers], students, a.renderer, q))
+    procs = [ctx.Process(target=worker, args=(w, tasks[w::a.workers], students, a.renderer, q,
+                                              a.touch, a.touch_hold))
              for w in range(a.workers)]
     for p in procs:
         p.start()
@@ -289,7 +332,8 @@ def main(argv=None):
             wr = csv.DictWriter(fh, fieldnames=list(rs[0]))
             wr.writeheader()
             wr.writerows(rs)
-    report(by, students, PAIRS, out, seeds)
+    pairs = PAIRS if a.pairs is None else [tuple(p.split(",")) for p in a.pairs]
+    report(by, students, pairs, out, seeds, touch=a.touch, hold=a.touch_hold)
 
 
 if __name__ == "__main__":
