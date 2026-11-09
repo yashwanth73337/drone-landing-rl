@@ -118,7 +118,18 @@ def fly_dice(env, model, seed, mode, sig_n):
                 drop_chance_at_drop=None if feet_drop is None else round(p_last, 4),
                 coin_drop=coin, steps=steps, time_s=round(steps * P.POLICY_DT, 1), ret=round(ret, 3),
                 p_far_median=round(float(np.median(pf)), 6), p_far_max=round(float(pf.max()), 4),
-                coin_risk=round(float(1.0 - np.exp(log_keep)), 4), vetoes=vetoes)
+                coin_risk=round(float(1.0 - np.exp(log_keep)), 4), vetoes=vetoes,
+                **touch_cols(info))
+
+
+def touch_cols(info):
+    """T3 (8 Nov): extra columns only in touch="sensor" mode (perfect mode: none, old rows)."""
+    td, tc = info.get("touchdown") or {}, info.get("touch")
+    if tc is None:
+        return {}
+    d = td.get("detect_delay_s")
+    return dict(touches=tc["touches"], missed=tc["missed"], touched_before_cut=td.get("touched_before_cut"),
+                detect_delay_s=None if d is None else round(d, 2), false_alarm=td.get("false_alarm"))
 
 
 def worker(w, tasks, ckpt, renderer, sigma, q, shield=None, veto_cost=0.0):

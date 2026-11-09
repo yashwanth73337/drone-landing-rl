@@ -24,6 +24,12 @@ Shield (Step 7e): --shield L uses the camera-based drop shield in the workers' s
 <= L m/s. A blocked press is part of the environment (nothing happens), so the stored
 action stays the policy's own choice. 'vetoes' = blocked presses per round.
 Press cost (Step 7f): --veto-cost c makes every blocked press cost c (default 0 = ppo2).
+Touch (T3, 8 Nov): --touch sensor trains AND examines with the drone's own touch detector
+(envs/touch_detector.py; --touch-hold N physics steps, default 10 = 0.1 s) instead of the
+simulator's perfect auto-cut. Default perfect = the old runs exactly. In sensor mode the
+round line adds det% (landed by the detector) and aft% (drop pressed after a touch), and
+the exam line adds detector / drop-after-touch / slow (> 0.5 s from first touch to motors
+off, i.e. touch-and-go) counts.
 
 Checkpoints: results/runs/<name>/last.pt every round (+ r<round>.pt at each exam). Key
 'model' = the student, so eval_student / dice_exam read them as they are.
@@ -50,7 +56,13 @@ DEV_SEED0 = 9000
 
 
 # ------------------------------------------------------------------ worker process
-def worker(w, cmd_q, res_q, renderer, sigma, run_seed, shield=None, veto_cost=0.0):
+def touch_kw(touch, hold):
+    """T3: LandingEnv arguments for the touch mode (perfect -> none: the old call)."""
+    return {} if touch == "perfect" else dict(touch="sensor", touch_cfg=dict(hold_steps=int(hold)))
+
+
+def worker(w, cmd_q, res_q, renderer, sigma, run_seed, shield=None, veto_cost=0.0,
+           touch="perfect", touch_hold=10):
     import torch
     torch.set_num_threads(1)
     from v6_drop.envs import landing_env as E
@@ -58,7 +70,8 @@ def worker(w, cmd_q, res_q, renderer, sigma, run_seed, shield=None, veto_cost=0.
     from v6_drop.scripts.dice_exam import fly_dice, sigma_norm
     sig_n = sigma_norm(sigma)
     model = PPO.ActorCritic(sigma_n=sig_n).eval()
-    env = E.LandingEnv(renderer=renderer, seed=0, drop_shield=shield, veto_cost=veto_cost)
+    env = E.LandingEnv(renderer=renderer, seed=0, drop_shield=shield, veto_cost=veto_cost,
+                       **touch_kw(touch, touch_hold))
     rng = np.random.default_rng([int(run_seed), w, 11])
     ep_count, need_reset, obs, hc = 0, True, None, None
     ep = {}
@@ -110,7 +123,8 @@ def worker(w, cmd_q, res_q, renderer, sigma, run_seed, shield=None, veto_cost=0.
                     td = info.get("touchdown") or {}
                     flights.append(dict(ep, ret=round(ep["ret"], 3), outcome=info["outcome"],
                                         reason=td.get("reason"),
-                                        impact=None if td.get("impact") is None else round(td["impact"], 3)))
+                                        impact=None if td.get("impact") is None else round(td["impact"], 3),
+                                        touched_before_cut=td.get("touched_before_cut")))
                     need_reset = True
             last_value = 0.0 if need_reset else PPO.value_of(model, obs, hc)
             arrays = {k: np.asarray(v) for k, v in buf.items()}
@@ -150,9 +164,15 @@ def exam_line(rows, rnd):
     outs = {}
     for r in rows:
         outs[r["outcome"]] = outs.get(r["outcome"], 0) + 1
-    return (f"[exam] round {rnd}: safe {len(ok)}/{n}, by drop {sum(r['reason'] == 'drop' for r in ok)}, "
+    line = (f"[exam] round {rnd}: safe {len(ok)}/{n}, by drop {sum(r['reason'] == 'drop' for r in ok)}, "
             f"auto-cut {sum(r['reason'] == 'auto_cut' for r in ok)}; outcomes {outs}; "
-            f"return {np.mean([r['ret'] for r in rows]):.2f}"), len(ok)
+            f"return {np.mean([r['ret'] for r in rows]):.2f}")
+    if rows and "touches" in rows[0]:                       # T3: sensor mode only
+        line += (f" | detector {sum(r['reason'] == 'touch_detect' for r in rows)}, drop after touch "
+                 f"{sum(r['reason'] == 'drop' and bool(r['touched_before_cut']) for r in rows)}, slow "
+                 f"{sum((r['detect_delay_s'] or 0) > 0.5 for r in rows)}, missed "
+                 f"{sum(bool(r['missed']) for r in rows)}, false alarms {sum(bool(r['false_alarm']) for r in rows)}")
+    return line, len(ok)
 
 
 def save(path, model, opt_a, opt_c, rnd, steps, ppo_start, ev_last, cfg):
@@ -232,6 +252,9 @@ def main(argv=None):
     ap.add_argument("--sigma", type=float, nargs=4, default=list(SIGMA))
     ap.add_argument("--shield", type=float, default=None, help="drop shield limit, m/s (Step 7e: 0.8)")
     ap.add_argument("--veto-cost", type=float, default=0.0, help="cost per blocked drop press (Step 7f: 0.05)")
+    ap.add_argument("--touch", choices=["perfect", "sensor"], default="perfect",
+                    help="T3: perfect = old simulator auto-cut; sensor = the drone's own touch detector")
+    ap.add_argument("--touch-hold", type=int, default=10, help="T3: physics steps the touch rule must hold")
     ap.add_argument("--renderer", choices=["egl", "tiny"], default="egl")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--seed", type=int, default=0)
@@ -265,7 +288,8 @@ def main(argv=None):
     ctx = mp.get_context("spawn")
     cmd_qs = [ctx.Queue() for _ in range(a.workers)]
     res_q = ctx.Queue()
-    procs = [ctx.Process(target=worker, args=(w, cmd_qs[w], res_q, a.renderer, a.sigma, a.seed, a.shield, a.veto_cost),
+    procs = [ctx.Process(target=worker, args=(w, cmd_qs[w], res_q, a.renderer, a.sigma, a.seed, a.shield, a.veto_cost,
+                                              a.touch, a.touch_hold),
                          daemon=True)
              for w in range(a.workers)]
     for p in procs:
@@ -323,6 +347,11 @@ def main(argv=None):
                        std_yaw_deg=round(float(np.degrees(std[3])), 2), lr_actor=lr_a,
                        t_collect=round(t1 - t0, 1), t_learn=round(t2 - t1, 1),
                        dps=round(n_dec / (t1 - t0), 0))
+            if a.touch == "sensor":                         # T3 columns (sensor mode only)
+                row["det_pct"] = round(100 * sum(f["outcome"] == "success" and f["reason"] == "touch_detect"
+                                                 for f in flights) / nf, 1) if nf else None
+                row["aft_pct"] = round(100 * sum(f["reason"] == "drop" and bool(f["touched_before_cut"])
+                                                 for f in flights) / nf, 1) if nf else None
             if mw is None:
                 mw = csv.DictWriter(mf, fieldnames=list(row))
                 if new_csv:
@@ -330,7 +359,9 @@ def main(argv=None):
             mw.writerow(row)
             mf.flush()
             print(f"[ppo] r {rnd} {row['phase']} | steps {steps:,} | flights {nf} safe {row['safe_pct']}% "
-                  f"drop {row['drop_pct']}% hard {row['hard']} veto {row['vetoes']} | ret {row['ret']} | EV {row['ev']:.2f} "
+                  f"drop {row['drop_pct']}% hard {row['hard']} veto {row['vetoes']}"
+                  + (f" det {row['det_pct']}% aft {row['aft_pct']}%" if a.touch == "sensor" else "")
+                  + f" | ret {row['ret']} | EV {row['ev']:.2f} "
                   f"Vloss {row['v_loss']:.3f} | KL {row['kl']:.4f} clip {row['clipfrac']:.2f} ep {row['epochs']} | "
                   f"std vx {row['std_vx']:.3f} vz {row['std_vz']:.3f} | lr {lr_a:.1e} | "
                   f"{row['t_collect']:.0f}+{row['t_learn']:.0f} s, {row['dps']:.0f} dec/s", flush=True)
