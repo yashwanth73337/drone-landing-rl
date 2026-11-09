@@ -30,6 +30,15 @@ from the centre) more than a safe drop (~0.70 m/s -> 12.07), so PPO would learn 
 dropping. DROP_BONUS = SOFT_BONUS, so ANY safe drop scores at least as much as ANY safe
 auto-cut landing at the same spot (equal only for a 1.0 m/s drop vs a 0.0 m/s touch), and a
 softer drop still scores more than a harder one. Auto-cut stays a safe landing (fallback).
+AIR-ONLY drop bonus (T4, 9 Nov, decided by Yashwanth): with the onboard touch detector
+(touch="sensor") the drone can touch the pad with the motors on and press drop afterwards.
+PPO trained that way (ppo2t) learned to TOUCH FIRST and drop at once in about half the
+flights (dev: air drops 74 -> 48), because the drop bonus paid for those too. Touching with
+motors on is riskier on a real drone (prop wash / ground effect, bounce near a moving pad;
+not modelled here). air_drop_only=True pays DROP_BONUS only if no foot touched the pad
+before the cut (touchdown["touched_before_cut"] False). A drop after a touch stays a safe
+landing with the centre and softness bonus. Default False = the old rule exactly; in the
+perfect (auto-cut) mode every drop is from the air anyway, so the flag changes nothing there.
 No progress mark is computed on the last step (after a touchdown or crash the camera
 view says nothing useful); the end mark covers it.
 
@@ -72,12 +81,14 @@ def potential(d, h):
     return -(d + max(h_feet - SLOPE * d, 0.0))
 
 
-def end_mark(outcome, touchdown):
+def end_mark(outcome, touchdown, air_drop_only=False):
     if outcome == "success":
         r = float(np.linalg.norm(touchdown["land_xy"]))
         centre = CENTRE_BONUS * max(0.0, 1.0 - r / CENTRE_RADIUS)
         soft = SOFT_BONUS * max(0.0, 1.0 - touchdown["impact"] / V_IMPACT_MAX)
         drop = DROP_BONUS if touchdown.get("reason") == "drop" else 0.0
+        if air_drop_only and touchdown.get("touched_before_cut"):   # T4: touched first
+            drop = 0.0
         return SUCCESS + centre + soft + drop
     if outcome == "hard_landing":
         return max(HARD_FLOOR, -HARD_SLOPE * (touchdown["impact"] - V_IMPACT_MAX))
@@ -87,9 +98,10 @@ def end_mark(outcome, touchdown):
 class Reward:
     """Stateful per episode: remembers the last good potential."""
 
-    def __init__(self, source="camera"):
+    def __init__(self, source="camera", air_drop_only=False):
         assert source in ("camera", "true")
         self.source = source
+        self.air_drop_only = bool(air_drop_only)                 # T4
         self.phi_last = None
 
     @staticmethod
@@ -125,6 +137,6 @@ class Reward:
             if not terms["seen"]:
                 terms["visibility"] = -VISIBILITY_PENALTY
         else:
-            terms["end"] = end_mark(outcome, touchdown)
+            terms["end"] = end_mark(outcome, touchdown, self.air_drop_only)
         total = terms["progress"] + terms["visibility"] + terms["time"] + terms["end"]
         return float(total), terms

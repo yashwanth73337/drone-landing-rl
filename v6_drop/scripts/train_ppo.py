@@ -30,6 +30,8 @@ simulator's perfect auto-cut. Default perfect = the old runs exactly. In sensor 
 round line adds det% (landed by the detector) and aft% (drop pressed after a touch), and
 the exam line adds detector / drop-after-touch / slow (> 0.5 s from first touch to motors
 off, i.e. touch-and-go) counts.
+Air-only drop bonus (T4, 9 Nov): --air-drop-bonus pays the reward's drop bonus only for
+drops with no touch before (see envs/reward.py). Default off = the old reward exactly.
 
 Checkpoints: results/runs/<name>/last.pt every round (+ r<round>.pt at each exam). Key
 'model' = the student, so eval_student / dice_exam read them as they are.
@@ -62,7 +64,7 @@ def touch_kw(touch, hold):
 
 
 def worker(w, cmd_q, res_q, renderer, sigma, run_seed, shield=None, veto_cost=0.0,
-           touch="perfect", touch_hold=10):
+           touch="perfect", touch_hold=10, air_drop_bonus=False):
     import torch
     torch.set_num_threads(1)
     from v6_drop.envs import landing_env as E
@@ -71,7 +73,7 @@ def worker(w, cmd_q, res_q, renderer, sigma, run_seed, shield=None, veto_cost=0.
     sig_n = sigma_norm(sigma)
     model = PPO.ActorCritic(sigma_n=sig_n).eval()
     env = E.LandingEnv(renderer=renderer, seed=0, drop_shield=shield, veto_cost=veto_cost,
-                       **touch_kw(touch, touch_hold))
+                       **touch_kw(touch, touch_hold), **({"air_drop_bonus": True} if air_drop_bonus else {}))
     rng = np.random.default_rng([int(run_seed), w, 11])
     ep_count, need_reset, obs, hc = 0, True, None, None
     ep = {}
@@ -255,6 +257,8 @@ def main(argv=None):
     ap.add_argument("--touch", choices=["perfect", "sensor"], default="perfect",
                     help="T3: perfect = old simulator auto-cut; sensor = the drone's own touch detector")
     ap.add_argument("--touch-hold", type=int, default=10, help="T3: physics steps the touch rule must hold")
+    ap.add_argument("--air-drop-bonus", action="store_true",
+                    help="T4: drop bonus only for drops with no touch before (default: old reward)")
     ap.add_argument("--renderer", choices=["egl", "tiny"], default="egl")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--seed", type=int, default=0)
@@ -289,7 +293,7 @@ def main(argv=None):
     cmd_qs = [ctx.Queue() for _ in range(a.workers)]
     res_q = ctx.Queue()
     procs = [ctx.Process(target=worker, args=(w, cmd_qs[w], res_q, a.renderer, a.sigma, a.seed, a.shield, a.veto_cost,
-                                              a.touch, a.touch_hold),
+                                              a.touch, a.touch_hold, a.air_drop_bonus),
                          daemon=True)
              for w in range(a.workers)]
     for p in procs:

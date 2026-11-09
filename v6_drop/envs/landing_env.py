@@ -44,6 +44,8 @@ touch="sensor" = the drone's own touch detector (envs/touch_detector.py). After 
 frame this env gives the world the frame's feet height (cam_feet: last confident ArUco +
 solvePnP measurement + own orientation, the same geometry as the shield; None if not
 confident). headless=True has no frames, so the detector cannot fire there.
+air_drop_bonus=True (T4, 9 Nov): the reward's drop bonus only for drops with no touch
+before (envs/reward.py, air_drop_only). Default False = the old reward exactly.
 drop_shield=None (default) = no shield, exactly the old behaviour.
 
 Press cost (Step 7f, decided 31 Oct, F1; the 'punish the learner when the shield steps
@@ -89,7 +91,7 @@ class LandingEnv(gym.Env):
 
     def __init__(self, renderer="egl", seed=0, gains_mode="random", layout=PB.DEFAULT_LAYOUT,
                  reward_source="camera", headless=False, drop_shield=None,
-                 touch="perfect", touch_cfg=None, veto_cost=0.0):
+                 touch="perfect", touch_cfg=None, air_drop_bonus=False, veto_cost=0.0):
         """headless=True (Step 6): no camera image per step (blank image), reward 0 and
         info['reward_terms'] None. ONLY for fast teacher evaluation; never for training.
         Episode starts still use the camera (start rule: >= 1 marker detected)."""
@@ -100,7 +102,7 @@ class LandingEnv(gym.Env):
         self.veto_cost = float(veto_cost)
         assert self.veto_cost >= 0.0
         self.last_meas = None                      # measurement of the frame the policy sees
-        self.reward_fn = Reward(reward_source)
+        self.reward_fn = Reward(reward_source, air_drop_only=air_drop_bonus)
         self.world = World(renderer=renderer, layout=layout, seed=seed, gains_mode=gains_mode,
                            touch=touch, touch_cfg=touch_cfg)
         f32 = np.float32
