@@ -35,6 +35,8 @@ touched before the cut), drops after a touch, detector cuts, slow (> 0.5 s from 
 touch to motors off = touch-and-go), missed touches, false alarms, delay median/max; the
 pair lines add a McNemar test on AIR drops. --pairs a,b ... chooses the pairs (default the
 Step 8 pairs). Without --touch everything is exactly as in Step 8.
+N1 (10 Nov): --noise low|medium|high flies every student with sensor noise on the drone's own
+estimates (envs/sensor_noise.py); the header says the level. Default none = as before.
 NOTE: seeds 9500-9999 were used once (Step 8, 31 Oct). Re-running them for the changed
 system is a SECOND use: say so in the paper.
 
@@ -145,7 +147,7 @@ def describe(rows):
 
 
 # ------------------------------------------------------------------ flying
-def worker(w, tasks, students, renderer, q, touch="perfect", touch_hold=10):
+def worker(w, tasks, students, renderer, q, touch="perfect", touch_hold=10, noise="none"):
     import torch
     torch.set_num_threads(1)
     from v6_drop.envs import landing_env as E
@@ -155,7 +157,8 @@ def worker(w, tasks, students, renderer, q, touch="perfect", touch_hold=10):
     models = {name: load(ck, "cpu")[0] for name, ck, _ in students}
     shields = {name: sh for name, _, sh in students}
     sig_n = sigma_norm()
-    env = E.LandingEnv(renderer=renderer, seed=0, **touch_kw(touch, touch_hold))
+    from v6_drop.scripts.eval_student import noise_kw
+    env = E.LandingEnv(renderer=renderer, seed=0, **touch_kw(touch, touch_hold), **noise_kw(noise)[0])
     rows, t0 = [], time.time()
     try:
         for j, (name, seed) in enumerate(tasks):
@@ -186,13 +189,14 @@ def parse_students(items, runs_root):
     return out
 
 
-def report(by, students, pairs, out, seeds, touch="perfect", hold=10):
+def report(by, students, pairs, out, seeds, touch="perfect", hold=10, noise="none"):
     names = [n for n, _, _ in students]
     D = {n: describe(by[n]) for n in names}
     f = lambda x, s="{:.2f}": "-" if x is None or (isinstance(x, float) and math.isnan(x)) else s.format(x)
     L = [f"FINAL EVALUATION: {len(names)} students x {len(seeds)} fresh seeds ({seeds[0]}..{seeds[-1]}), "
          f"clean flights, CPU, same seeds for all"
-         + ("" if touch == "perfect" else f"; ONBOARD TOUCH DETECTOR (hold {hold} steps = {hold / 100:.2f} s)"), ""]
+         + ("" if touch == "perfect" else f"; ONBOARD TOUCH DETECTOR (hold {hold} steps = {hold / 100:.2f} s)")
+         + ("" if noise in (None, "none") else f"; SENSOR NOISE {noise}"), ""]
     L.append(f"{'student':18s} {'shield':6s} {'safe % [95% CI]':22s} {'drop % [95% CI]':22s} {'hard':>4s} "
              f"{'timeout':>7s} {'other':>5s} {'impact mean/p95':>15s} {'offset cm':>9s} {'time s':>6s}")
     for n, ck, sh in students:
@@ -297,6 +301,8 @@ def main(argv=None):
     ap.add_argument("--touch", choices=["perfect", "sensor"], default="perfect",
                     help="T5: perfect = old simulator auto-cut; sensor = the drone's own touch detector")
     ap.add_argument("--touch-hold", type=int, default=10, help="T5: physics steps the touch rule must hold")
+    ap.add_argument("--noise", choices=["none", "low", "medium", "high"], default="none",
+                    help="N1: sensor noise level for the drone's own estimates (envs/sensor_noise.py)")
     ap.add_argument("--pairs", nargs="*", default=None, help="T5: a,b pairs for McNemar (default: Step 8 pairs)")
     a = ap.parse_args(argv)
     students = parse_students(a.students, a.runs_root)
@@ -316,7 +322,7 @@ def main(argv=None):
     q = ctx.Queue()
     t0 = time.time()
     procs = [ctx.Process(target=worker, args=(w, tasks[w::a.workers], students, a.renderer, q,
-                                              a.touch, a.touch_hold))
+                                              a.touch, a.touch_hold, a.noise))
              for w in range(a.workers)]
     for p in procs:
         p.start()
@@ -333,7 +339,7 @@ def main(argv=None):
             wr.writeheader()
             wr.writerows(rs)
     pairs = PAIRS if a.pairs is None else [tuple(p.split(",")) for p in a.pairs]
-    report(by, students, pairs, out, seeds, touch=a.touch, hold=a.touch_hold)
+    report(by, students, pairs, out, seeds, touch=a.touch, hold=a.touch_hold, noise=a.noise)
 
 
 if __name__ == "__main__":

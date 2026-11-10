@@ -19,6 +19,9 @@ simulator's perfect auto-cut (--touch-hold N: physics steps the rule must hold, 
 0.1 s). Files get the prefix touch<N>_ ; the csv gets touches, missed, false_alarm,
 detect_delay_s, touch_impact_max; the summary adds lines on touches, delays, misses and
 false alarms. Without --touch (= perfect) every output is exactly as before.
+N1 (10 Nov): --noise low|medium|high adds sensor noise to the drone's own estimates (camera
+grain, drifting speed and orientation errors; envs/sensor_noise.py). Files get the prefix
+noise<level>_ and the summary says the level. --noise none (default) = exactly as before.
 T2 (7 Nov): csv also fired_in_hop, touched_before_cut, cam_age_s; summary splits drops into
 'from the air' and 'after a touch', counts false alarms only with no touch before (hops after
 a touch are counted apart) and counts detector cuts that used a carried-forward camera value.
@@ -155,7 +158,14 @@ def touch_kw(touch, hold):
     return dict(touch="sensor", touch_cfg=dict(hold_steps=hold)), f"touch{hold}_"
 
 
-def exam(model, ckpt, n, device, seed0=9000, shield=None, touch="perfect", hold=10):
+def noise_kw(noise):
+    """N1: LandingEnv argument and file prefix for the noise level (none -> the old call)."""
+    if noise in (None, "none"):
+        return {}, ""
+    return dict(sensor_noise=noise), f"noise{noise}_"
+
+
+def exam(model, ckpt, n, device, seed0=9000, shield=None, touch="perfect", hold=10, noise="none"):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -167,6 +177,9 @@ def exam(model, ckpt, n, device, seed0=9000, shield=None, touch="perfect", hold=
     tkw, tpre = touch_kw(touch, hold)
     kw.update(tkw)
     pre = tpre + pre
+    nkw, npre = noise_kw(noise)
+    kw.update(nkw)
+    pre = npre + pre
     env = E.LandingEnv(renderer="egl", seed=0, **kw)
     rows, paths, t0 = [], [], time.time()
     try:
@@ -208,6 +221,8 @@ def exam(model, ckpt, n, device, seed0=9000, shield=None, touch="perfect", hold=
     lines = [f"Student exam: {os.path.abspath(ckpt)} on {n} test episodes (seeds {seed0}..{seed0 + n - 1})",
              f"safe landings: {k}/{n} = {100 * k / n:.1f}%  (95% CI {lo:.1f}-{hi:.1f}%)",
              f"outcomes: {outs}"]
+    if noise not in (None, "none"):                                 # N1
+        lines.insert(1, f"SENSOR NOISE: {env.noise.config()}")
     if ok:
         imp = np.array([r["impact"] for r in ok])
         off = np.array([r["offset_cm"] for r in ok])
@@ -284,7 +299,7 @@ def pick_seeds(csv_path, kind):
     return seeds
 
 
-def videos(model, ckpt, seeds, device, shield=None, touch="perfect", hold=10):
+def videos(model, ckpt, seeds, device, shield=None, touch="perfect", hold=10, noise="none"):
     out = os.path.dirname(os.path.abspath(ckpt))
     stem = os.path.splitext(os.path.basename(ckpt))[0]
     pre = ("" if stem == "last" else stem + "_") + ("" if shield is None else f"shield{round(100 * shield)}_")
@@ -292,6 +307,9 @@ def videos(model, ckpt, seeds, device, shield=None, touch="perfect", hold=10):
     tkw, tpre = touch_kw(touch, hold)
     kw.update(tkw)
     pre = tpre + pre
+    nkw, npre = noise_kw(noise)
+    kw.update(nkw)
+    pre = npre + pre
     env = E.LandingEnv(renderer="egl", seed=0, **kw)
     try:
         for seed in seeds:
@@ -318,6 +336,8 @@ def main():
     ap.add_argument("--touch", choices=["perfect", "sensor"], default="perfect",
                     help="T1: perfect = old simulator auto-cut; sensor = the drone's own touch detector")
     ap.add_argument("--touch-hold", type=int, default=10, help="T1: physics steps the touch rule must hold")
+    ap.add_argument("--noise", choices=["none", "low", "medium", "high"], default="none",
+                    help="N1: sensor noise level for the drone's own estimates (envs/sensor_noise.py)")
     a = ap.parse_args()
     model, ck = load(a.ckpt, a.device)
     when = f"epoch {ck['epoch']}" if "epoch" in ck else f"PPO round {ck.get('round')}"   # 7e: PPO files
@@ -326,9 +346,10 @@ def main():
         a.videos = pick_seeds(a.pick_from, a.pick)
         print(f"[video] picked seeds ({a.pick}): {a.videos}", flush=True)
     if a.videos:
-        videos(model, a.ckpt, a.videos, a.device, shield=a.shield, touch=a.touch, hold=a.touch_hold)
+        videos(model, a.ckpt, a.videos, a.device, shield=a.shield, touch=a.touch, hold=a.touch_hold, noise=a.noise)
     else:
-        exam(model, a.ckpt, a.n, a.device, seed0=a.seed0, shield=a.shield, touch=a.touch, hold=a.touch_hold)
+        exam(model, a.ckpt, a.n, a.device, seed0=a.seed0, shield=a.shield, touch=a.touch, hold=a.touch_hold,
+             noise=a.noise)
 
 
 if __name__ == "__main__":

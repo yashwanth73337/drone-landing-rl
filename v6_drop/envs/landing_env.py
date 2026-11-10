@@ -44,6 +44,11 @@ touch="sensor" = the drone's own touch detector (envs/touch_detector.py). After 
 frame this env gives the world the frame's feet height (cam_feet: last confident ArUco +
 solvePnP measurement + own orientation, the same geometry as the shield; None if not
 confident). headless=True has no frames, so the detector cannot fire there.
+sensor_noise (N1, 10 Nov): None (default, exact sensing as before) or a level name "low" /
+"medium" / "high" (envs/sensor_noise.py). The drone's OWN estimates get noise: the student's
+picture (camera grain) and state (speed, orientation), the drop shield (camera height + own
+orientation + own sink), the touch detector (camera height + own vertical speed). The reward
+and the referee keep the truth. The student is not retrained (evaluation-only robustness).
 air_drop_bonus=True (T4, 9 Nov): the reward's drop bonus only for drops with no touch
 before (envs/reward.py, air_drop_only). Default False = the old reward exactly.
 drop_shield=None (default) = no shield, exactly the old behaviour.
@@ -66,6 +71,7 @@ from . import lmf2_params as P
 from .reward import Reward, geometry_from_body
 from .platform_s1 import V_MAX
 from .world import World
+from .sensor_noise import SensorNoise, R_to_quat
 
 OBS_W, OBS_H = 256, 160                                    # O1
 ACT_SCALE = np.array([6.0, 6.0, 1.0, np.radians(60.0)])     # A1: m/s, m/s, m/s, rad/s
@@ -91,7 +97,7 @@ class LandingEnv(gym.Env):
 
     def __init__(self, renderer="egl", seed=0, gains_mode="random", layout=PB.DEFAULT_LAYOUT,
                  reward_source="camera", headless=False, drop_shield=None,
-                 touch="perfect", touch_cfg=None, air_drop_bonus=False, veto_cost=0.0):
+                 touch="perfect", touch_cfg=None, air_drop_bonus=False, sensor_noise=None, veto_cost=0.0):
         """headless=True (Step 6): no camera image per step (blank image), reward 0 and
         info['reward_terms'] None. ONLY for fast teacher evaluation; never for training.
         Episode starts still use the camera (start rule: >= 1 marker detected)."""
@@ -103,8 +109,9 @@ class LandingEnv(gym.Env):
         assert self.veto_cost >= 0.0
         self.last_meas = None                      # measurement of the frame the policy sees
         self.reward_fn = Reward(reward_source, air_drop_only=air_drop_bonus)
+        self.noise = None if sensor_noise in (None, "none") else SensorNoise(sensor_noise, seed=seed)   # N1
         self.world = World(renderer=renderer, layout=layout, seed=seed, gains_mode=gains_mode,
-                           touch=touch, touch_cfg=touch_cfg)
+                           touch=touch, touch_cfg=touch_cfg, noise=self.noise)
         f32 = np.float32
         self.observation_space = spaces.Dict({
             "image": spaces.Box(0, 255, (OBS_H, OBS_W), np.uint8),
@@ -122,10 +129,18 @@ class LandingEnv(gym.Env):
         self.world.close()
 
     # ---- observation ------------------------------------------------------------------
+    def own(self):
+        """N1: the drone's own orientation and velocity estimate (exact if no noise)."""
+        s = self.world.true_state()
+        if self.noise is None:
+            return s["R"], s["v"]
+        return self.noise.rotation(s["R"]), self.noise.velocity(s["v"])
+
     def _obs(self, img_full):
         s = self.world.true_state()
-        R, v = s["R"], s["v"]
-        q = np.array(s["quat"], dtype=np.float64)          # PyBullet order (x, y, z, w)
+        R, v = self.own()
+        q = (np.array(s["quat"], dtype=np.float64) if self.noise is None
+             else R_to_quat(R))                            # PyBullet order (x, y, z, w)
         if q[3] < 0:
             q = -q                                         # q and -q are the same rotation
         state = np.concatenate([(R.T @ v) / VEL_SCALE, q, self.applied / ACT_SCALE])
@@ -148,6 +163,9 @@ class LandingEnv(gym.Env):
         v_head = yaw_rotation(yaw).T @ s["v"]
         self.applied = np.clip(np.array([*v_head, 0.0]), -ACT_SCALE, ACT_SCALE)
         self.asked = self.applied.copy()
+        if self.noise is not None and not self.headless:   # N1: the drone's first frame is grainy
+            out["image"] = self.noise.image(out["image"])
+            out["measurement"] = PB.measure(out["image"], self.world.cam, self.world.layout, self.world.det)
         self.reward_fn.reset(out["measurement"], s)
         self.last_meas = out["measurement"]
         self.world.set_camera_feet(self.cam_feet(out["measurement"]))       # T1
@@ -160,7 +178,7 @@ class LandingEnv(gym.Env):
         own orientation; None if the measurement is not confident."""
         if m is None or not (m.ok and m.confident):
             return None
-        _, h = geometry_from_body(m.p_body, self.world.true_state()["R"])
+        _, h = geometry_from_body(m.p_body, self.own()[0])
         return float(h - P.REST_HEIGHT)
 
     def shield_check(self):
@@ -170,10 +188,10 @@ class LandingEnv(gym.Env):
         m = self.last_meas
         if m is None or not (m.ok and m.confident):
             return False, None, None
-        s = self.world.true_state()                        # own R and v (IMU / EKF)
-        _, h = geometry_from_body(m.p_body, s["R"])
+        R, v = self.own()                                  # own R and v (IMU / EKF; N1 noisy)
+        _, h = geometry_from_body(m.p_body, R)
         h_feet = max(h - P.REST_HEIGHT, 0.0)
-        sink = max(-float(s["v"][2]), 0.0)
+        sink = max(-float(v[2]), 0.0)
         pred = float(np.sqrt(sink * sink + 2.0 * P.G * h_feet))
         return pred <= self.drop_shield, pred, h_feet
 
@@ -196,6 +214,8 @@ class LandingEnv(gym.Env):
                         reward_terms=None, **sh)
             return obs, 0.0, term, trunc, info
         img = self.world.render()
+        if self.noise is not None:                         # N1: camera grain
+            img = self.noise.image(img)
         obs = self._obs(img)
         meas = None
         if info["outcome"] is None:                        # no camera reward after the end

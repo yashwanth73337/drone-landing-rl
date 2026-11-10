@@ -35,6 +35,9 @@ C1 rules (decided 28 Oct):
   never confirms is a MISSED touch (motors stay on; the student may still drop; else
   timeout). info["touch"] reports touches, delay, impact. touch="perfect" (default) is the
   old auto-cut, unchanged, so all earlier results stay reproducible.
+  N1 (10 Nov): noise=SensorNoise(...) (envs/sensor_noise.py) adds drifting errors to the
+  drone's own speed and orientation; they advance every physics step and the touch detector
+  reads the NOISY vertical speed. The referee is unchanged. noise=None (default) = as before.
   Impact speed: after a drop only gravity acts, so it is computed EXACTLY by energy
   conservation from the state at the drop: v_touch = sqrt(vz0^2 + 2 g gap0) (D4). For an
   auto-cut touch (thrust on until the touch) the per-step reading is used (+-0.1 m/s).
@@ -107,7 +110,7 @@ class World:
     _egl_open = 0                        # EGL Worlds currently open in this process
 
     def __init__(self, renderer="egl", layout=PB.DEFAULT_LAYOUT, seed=0, gains_mode="random",
-                 touch="perfect", touch_cfg=None):
+                 touch="perfect", touch_cfg=None, noise=None):
         assert touch in TOUCH_MODES, touch
         if renderer == "egl" and World._egl_open > 0:
             raise RuntimeError("an EGL World is already open in this process; "
@@ -136,6 +139,7 @@ class World:
         self._k = 0                      # physics steps since reset (T1 referee clock)
         self._tr = None                  # T1 referee record of true touches (sensor mode)
         self._on_pad = False
+        self.noise = noise               # N1: SensorNoise or None (drone's own estimates only)
 
     # ---- setup ----------------------------------------------------------------------
     def _seed_streams(self, seed):
@@ -165,6 +169,8 @@ class World:
         """Evaluation helper: per-episode seeding (pinned seed sets). Training samples
         the gains once per World (Shin Table II: 'Env. init')."""
         self._seed_streams(seed)
+        if self.noise is not None:                                 # N1
+            self.noise.reseed(seed)
         if resample_gains:
             self.gains = P.sample_gains(self.rng_gains)
             self.quad.ctrl = LeeVelocityController(self.gains)
@@ -224,10 +230,17 @@ class World:
         self._tr = dict(touches=0, first_k=None, impact_max=None)
         if self.detector is not None:
             self.detector.reset()
+        if self.noise is not None:                                 # N1: new episode errors
+            self.noise.reset()
         if img is None:
             img = self.render()
             meas = PB.measure(img, self.cam, self.layout, self.det)
         return dict(image=img, spawn=spawn, measurement=meas, tries=tries)
+
+    def own_vz(self):
+        """N1: the drone's own vertical speed estimate (noisy if noise is on)."""
+        vz = float(self.quad.state()["v"][2])
+        return vz if self.noise is None else vz + float(self.noise.v_err[2])
 
     def set_camera_feet(self, feet):
         """T1: the latest camera frame's feet height above the pad top (m; None = no confident
@@ -250,6 +263,8 @@ class World:
             p.stepSimulation(physicsClientId=self.cid)
             self.plat.integrate()
             self._k += 1
+            if self.noise is not None:                             # N1
+                self.noise.advance()
             kind = self._contact_kind()
             if kind == "top" and self.touch == "perfect":          # AUTO-CUT (Option A, old)
                 info = self._touchdown_phase(reason="auto_cut", v_pre=v_pre, already_touching=True)
@@ -273,7 +288,7 @@ class World:
                     self._on_pad = False
             if self._tilt() > TILT_FLIGHT_MAX:
                 return self._finish(self._flight_end("flip"), truncated=False)
-            if self.touch == "sensor" and self.detector.update(self.quad.state()["v"][2]):
+            if self.touch == "sensor" and self.detector.update(self.own_vz()):
                 info = self._touchdown_phase(reason="touch_detect", v_pre=v_pre,
                                              already_touching=(kind == "top"))
                 return self._finish(info, truncated=False)

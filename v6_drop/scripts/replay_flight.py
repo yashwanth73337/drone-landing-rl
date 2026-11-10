@@ -13,6 +13,8 @@ Every replay is CHECKED: all columns of the new row must equal the csv row (outc
 impact, time, touches, delay, ...). MATCH -> the video is that flight. MISMATCH -> the fields
 that differ are printed, and the files are still written (named ..._MISMATCH).
 
+N1 (10 Nov): --noise LEVEL must match the final_eval run's --noise (default none).
+
 Run (from the repo root), e.g. the missed touch of ppo2 seed 2 in touch9500:
   python -m v6_drop.scripts.replay_flight --csv v6_drop/results/final_eval/touch9500/flights_ppo2_s2.csv \\
       --ckpt v6_drop/results/runs/ppo2_s2/r0299.pt --touch sensor --seeds 9520
@@ -98,6 +100,8 @@ def main(argv=None):
     ap.add_argument("--touch", choices=["perfect", "sensor"], default="perfect",
                     help="must be the touch mode of the final_eval run")
     ap.add_argument("--touch-hold", type=int, default=10)
+    ap.add_argument("--noise", choices=["none", "low", "medium", "high"], default="none",
+                    help="N1: sensor noise level for the drone's own estimates (envs/sensor_noise.py)")
     ap.add_argument("--renderer", choices=["egl", "tiny"], default="egl",
                     help="must be the renderer of the final_eval run (default egl)")
     ap.add_argument("--no-video", action="store_true", help="only check the match (fast)")
@@ -111,7 +115,7 @@ def main(argv=None):
     model, _ = ES.load(a.ckpt, "cpu")
     student = os.path.basename(a.csv)[len("flights_"):-len(".csv")]
     out = os.path.dirname(os.path.abspath(a.csv))
-    env = E.LandingEnv(renderer=a.renderer, seed=0, **touch_kw(a.touch, a.touch_hold))
+    env = E.LandingEnv(renderer=a.renderer, seed=0, **touch_kw(a.touch, a.touch_hold), **ES.noise_kw(a.noise)[0])
     n_match = 0
     try:
         for seed in a.seeds:
