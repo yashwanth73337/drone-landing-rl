@@ -76,9 +76,12 @@ def choose(mean, p, mode, sig_n, rng):
     return move, int(drop), bool(drop and p <= 0.5)
 
 
-def fly_dice(env, model, seed, mode, sig_n):
+def fly_dice(env, model, seed, mode, sig_n, before=None, after=None):
     """One flight of the dice exam. Returns a row dict. A drop the shield blocks does not
-    count as a drop (feet/chance at the drop are those of the drop that happened)."""
+    count as a drop (feet/chance at the drop are those of the drop that happened).
+    T6 (10 Nov): before(env, act, p) is called just before each env.step and after(env, info)
+    just after it (scripts/replay_flight.py films a flight with them). They may only LOOK
+    (render, read); None (default) = the old function exactly."""
     import torch
     from v6_drop.envs import lmf2_params as P
     from v6_drop.envs.platform_s1 import PAD_TOP_Z
@@ -99,7 +102,11 @@ def fly_dice(env, model, seed, mode, sig_n):
             p_far.append(p)
         if p <= 0.5:
             log_keep += np.log1p(-min(p, 1 - 1e-12))
+        if before is not None:
+            before(env, {"move": move, "drop": drop}, p)
         obs, r, term, trunc, info = env.step({"move": move, "drop": drop})
+        if after is not None:
+            after(env, info)
         if info.get("shield_veto"):
             vetoes += 1
         elif drop:
