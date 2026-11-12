@@ -32,6 +32,10 @@ the exam line adds detector / drop-after-touch / slow (> 0.5 s from first touch 
 off, i.e. touch-and-go) counts.
 Air-only drop bonus (T4, 9 Nov): --air-drop-bonus pays the reward's drop bonus only for
 drops with no touch before (see envs/reward.py). Default off = the old reward exactly.
+Critic input (A1, 12 Nov, ABLATION 1): --critic-input h gives the CAMERA-ONLY critic: it
+reads only the actor's memory h (detached), never the 8 true-state numbers (priv). Default
+priv_h = the main method exactly. Saved in the checkpoint ('critic_input'); --resume must
+give the same value (checked).
 
 Checkpoints: results/runs/<name>/last.pt every round (+ r<round>.pt at each exam). Key
 'model' = the student, so eval_student / dice_exam read them as they are.
@@ -64,14 +68,14 @@ def touch_kw(touch, hold):
 
 
 def worker(w, cmd_q, res_q, renderer, sigma, run_seed, shield=None, veto_cost=0.0,
-           touch="perfect", touch_hold=10, air_drop_bonus=False):
+           touch="perfect", touch_hold=10, air_drop_bonus=False, critic_input="priv_h"):
     import torch
     torch.set_num_threads(1)
     from v6_drop.envs import landing_env as E
     from v6_drop.learn import ppo as PPO
     from v6_drop.scripts.dice_exam import fly_dice, sigma_norm
     sig_n = sigma_norm(sigma)
-    model = PPO.ActorCritic(sigma_n=sig_n).eval()
+    model = PPO.ActorCritic(sigma_n=sig_n, critic_input=critic_input).eval()
     env = E.LandingEnv(renderer=renderer, seed=0, drop_shield=shield, veto_cost=veto_cost,
                        **touch_kw(touch, touch_hold), **({"air_drop_bonus": True} if air_drop_bonus else {}))
     rng = np.random.default_rng([int(run_seed), w, 11])
@@ -181,6 +185,7 @@ def save(path, model, opt_a, opt_c, rnd, steps, ppo_start, ev_last, cfg):
     import torch
     torch.save(dict(model=model.student.state_dict(), size=model.student.size,
                     log_std=model.log_std.detach().cpu(), critic=model.critic.state_dict(),
+                    critic_input=model.critic_input,
                     opt_actor=opt_a.state_dict(), opt_critic=opt_c.state_dict(), round=rnd,
                     steps=steps, ppo_start=ppo_start, ev_last=ev_last, config=cfg), path + ".tmp")
     os.replace(path + ".tmp", path)
@@ -259,6 +264,8 @@ def main(argv=None):
     ap.add_argument("--touch-hold", type=int, default=10, help="T3: physics steps the touch rule must hold")
     ap.add_argument("--air-drop-bonus", action="store_true",
                     help="T4: drop bonus only for drops with no touch before (default: old reward)")
+    ap.add_argument("--critic-input", choices=list(PPO.CRITIC_INPUTS), default="priv_h",
+                    help="A1: priv_h = main method (true state + memory h); h = camera-only critic (ablation 1)")
     ap.add_argument("--renderer", choices=["egl", "tiny"], default="egl")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--seed", type=int, default=0)
@@ -269,7 +276,7 @@ def main(argv=None):
     torch.manual_seed(a.seed)
     device = torch.device(a.device)
 
-    model = PPO.ActorCritic(sigma_n=sigma_norm(a.sigma)).to(device)
+    model = PPO.ActorCritic(sigma_n=sigma_norm(a.sigma), critic_input=a.critic_input).to(device)
     opt_a = torch.optim.Adam(model.actor_parameters(), lr=0.0)
     opt_c = torch.optim.Adam(model.critic.parameters(), lr=a.lr_critic)
     start, steps, ppo_start, ev_last = 0, 0, None, float("nan")
@@ -279,6 +286,9 @@ def main(argv=None):
         print(f"[ppo] actor from {os.path.abspath(a.init)}; critic NEW", flush=True)
     else:
         ck = torch.load(a.resume, map_location=device, weights_only=False)
+        ck_ci = ck.get("critic_input", "priv_h")           # checkpoints before A1: main method
+        assert ck_ci == a.critic_input, (f"checkpoint critic input is '{ck_ci}' but --critic-input is "
+                                         f"'{a.critic_input}': give --critic-input {ck_ci}")
         model.student.load_state_dict(ck["model"])
         model.log_std.data.copy_(ck["log_std"].to(device))
         model.critic.load_state_dict(ck["critic"])
@@ -286,6 +296,9 @@ def main(argv=None):
         opt_c.load_state_dict(ck["opt_critic"])
         start, steps, ppo_start, ev_last = ck["round"] + 1, ck["steps"], ck["ppo_start"], ck["ev_last"]
         print(f"[ppo] resumed {os.path.abspath(a.resume)} at round {start}", flush=True)
+    print(f"[ppo] critic input: {a.critic_input} ("
+          + ("true state + memory h, main method" if a.critic_input == "priv_h" else
+             "memory h ONLY, camera-only critic = ablation 1") + ")", flush=True)
     cfg = dict(vars(a))
     json.dump(cfg, open(os.path.join(out, "config.json"), "w"), indent=1)
 
@@ -293,7 +306,7 @@ def main(argv=None):
     cmd_qs = [ctx.Queue() for _ in range(a.workers)]
     res_q = ctx.Queue()
     procs = [ctx.Process(target=worker, args=(w, cmd_qs[w], res_q, a.renderer, a.sigma, a.seed, a.shield, a.veto_cost,
-                                              a.touch, a.touch_hold, a.air_drop_bonus),
+                                              a.touch, a.touch_hold, a.air_drop_bonus, a.critic_input),
                          daemon=True)
              for w in range(a.workers)]
     for p in procs:

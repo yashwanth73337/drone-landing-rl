@@ -33,26 +33,33 @@ import torch.nn.functional as F
 from v6_drop.learn.student import Student
 
 PRIV_DIM = 8
+CRITIC_INPUTS = ("priv_h", "h")        # A1: main method (true state + memory) / camera-only
 LOG_2PI = math.log(2 * math.pi)
 LOG_STD_MIN, LOG_STD_MAX = math.log(0.005), math.log(0.5)     # policy units (action / ACT_SCALE)
 
 
 class Critic(nn.Module):
-    def __init__(self, feat=256, hidden=256):
+    def __init__(self, feat=256, hidden=256, use_priv=True):
         super().__init__()
-        self.net = nn.Sequential(nn.Linear(PRIV_DIM + feat, hidden), nn.ELU(),
+        self.use_priv = bool(use_priv)
+        n_in = (PRIV_DIM if self.use_priv else 0) + feat
+        self.net = nn.Sequential(nn.Linear(n_in, hidden), nn.ELU(),
                                  nn.Linear(hidden, hidden), nn.ELU(), nn.Linear(hidden, 1))
 
     def forward(self, priv, feats):
-        return self.net(torch.cat([priv, feats], dim=-1)).squeeze(-1)
+        x = torch.cat([priv, feats], dim=-1) if self.use_priv else feats   # A1: h only
+        return self.net(x).squeeze(-1)
 
 
 class ActorCritic(nn.Module):
-    def __init__(self, student=None, sigma_n=(0.2 / 6, 0.2 / 6, 0.05, 0.05), size=256):
+    def __init__(self, student=None, sigma_n=(0.2 / 6, 0.2 / 6, 0.05, 0.05), size=256,
+                 critic_input="priv_h"):
         super().__init__()
+        assert critic_input in CRITIC_INPUTS, critic_input
+        self.critic_input = critic_input
         self.student = student if student is not None else Student(size)
         self.log_std = nn.Parameter(torch.log(torch.as_tensor(sigma_n, dtype=torch.float32)))
-        self.critic = Critic(self.student.size)
+        self.critic = Critic(self.student.size, use_priv=critic_input == "priv_h")
 
     def actor_parameters(self):
         return list(self.student.parameters()) + [self.log_std]
