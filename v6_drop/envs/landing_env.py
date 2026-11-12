@@ -166,6 +166,7 @@ class LandingEnv(gym.Env):
         if self.noise is not None and not self.headless:   # N1: the drone's first frame is grainy
             out["image"] = self.noise.image(out["image"])
             out["measurement"] = PB.measure(out["image"], self.world.cam, self.world.layout, self.world.det)
+        self.last_frame = None if self.headless else out["image"]          # V1: shown in videos
         self.reward_fn.reset(out["measurement"], s)
         self.last_meas = out["measurement"]
         self.world.set_camera_feet(self.cam_feet(out["measurement"]))       # T1
@@ -216,6 +217,7 @@ class LandingEnv(gym.Env):
         img = self.world.render()
         if self.noise is not None:                         # N1: camera grain
             img = self.noise.image(img)
+        self.last_frame = img                              # V1: the picture the drone used (videos)
         obs = self._obs(img)
         meas = None
         if info["outcome"] is None:                        # no camera reward after the end

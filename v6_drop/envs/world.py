@@ -133,6 +133,8 @@ class World:
         self.t = 0                       # decisions since reset (0.1 s each)
         self.frame_hook = None           # Step 8.3 videos: called as hook(k) after every motors-off
         self._off_k = 0                  # physics step; it only RENDERS, physics is unchanged
+        self.step_hook = None            # V1 (12 Nov) videos: hook(k) after every motors-ON physics
+                                         # step, before a detector cut; LOOK-ONLY (render / read)
         self.done = True                 # call reset() first
         self.touch = touch               # T1: "perfect" (old auto-cut) or "sensor"
         self.detector = TouchDetector(**(touch_cfg or {})) if touch == "sensor" else None
@@ -288,7 +290,10 @@ class World:
                     self._on_pad = False
             if self._tilt() > TILT_FLIGHT_MAX:
                 return self._finish(self._flight_end("flip"), truncated=False)
-            if self.touch == "sensor" and self.detector.update(self.own_vz()):
+            fired = self.touch == "sensor" and self.detector.update(self.own_vz())
+            if self.step_hook is not None:                         # V1: video only
+                self.step_hook(self._k)
+            if fired:
                 info = self._touchdown_phase(reason="touch_detect", v_pre=v_pre,
                                              already_touching=(kind == "top"))
                 return self._finish(info, truncated=False)
