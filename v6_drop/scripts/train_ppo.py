@@ -36,6 +36,9 @@ Critic input (A1, 12 Nov, ABLATION 1): --critic-input h gives the CAMERA-ONLY cr
 reads only the actor's memory h (detached), never the 8 true-state numbers (priv). Default
 priv_h = the main method exactly. Saved in the checkpoint ('critic_input'); --resume must
 give the same value (checked).
+Random start (A2, 13 Nov, ABLATION 2 "no demos"): --random-init starts PPO from an UNTRAINED
+Student (no teacher, no copying, no DAgger). Its random weights come from torch seed --seed,
+so the run repeats exactly. Give exactly one of --init / --resume / --random-init.
 
 Checkpoints: results/runs/<name>/last.pt every round (+ r<round>.pt at each exam). Key
 'model' = the student, so eval_student / dice_exam read them as they are.
@@ -233,6 +236,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--init", help="student checkpoint to start the actor from (dagger_r4/last.pt)")
     ap.add_argument("--resume", help="a PPO last.pt to continue")
+    ap.add_argument("--random-init", action="store_true",
+                    help="A2: start from an UNTRAINED student (no demos; ablation 2)")
     ap.add_argument("--name", required=True)
     ap.add_argument("--out-root", default=RUNS)
     ap.add_argument("--workers", type=int, default=8)
@@ -270,7 +275,8 @@ def main(argv=None):
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args(argv)
-    assert (a.init is None) != (a.resume is None), "give exactly one of --init / --resume"
+    assert (a.init is not None) + (a.resume is not None) + bool(a.random_init) == 1, \
+        "give exactly one of --init / --resume / --random-init"
     out = os.path.join(a.out_root, a.name)
     os.makedirs(out, exist_ok=True)
     torch.manual_seed(a.seed)
@@ -280,7 +286,10 @@ def main(argv=None):
     opt_a = torch.optim.Adam(model.actor_parameters(), lr=0.0)
     opt_c = torch.optim.Adam(model.critic.parameters(), lr=a.lr_critic)
     start, steps, ppo_start, ev_last = 0, 0, None, float("nan")
-    if a.init:
+    if a.random_init:                                       # A2: the student keeps its random weights
+        print(f"[ppo] actor RANDOM (untrained, no demos = ablation 2; torch seed {a.seed}); critic NEW",
+              flush=True)
+    elif a.init:
         ck = torch.load(a.init, map_location=device, weights_only=False)
         model.student.load_state_dict(ck["model"])
         print(f"[ppo] actor from {os.path.abspath(a.init)}; critic NEW", flush=True)
