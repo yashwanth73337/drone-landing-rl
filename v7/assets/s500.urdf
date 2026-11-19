@@ -1,0 +1,43 @@
+<?xml version="1.0"?>
+<!-- v7 S1b: S500-sized quadrotor with skid landing gear (19 Nov 2026).
+     Shape only. Mass 1.24 kg and inertia are the LMF2 values (unchanged from V6); the
+     motors and the controller are LMF2 too (we do not know the lab S500's motors yet).
+     S500 numbers from shop listings: wheelbase 500 mm (motors at +-0.177, +-0.177),
+     landing gear 200 mm below the frame. ASSUMED until measured: body plate 0.14 x 0.14 x 0.04,
+     skids 0.24 m long (along x, forward) at y = +-0.11, skid radius 0.008.
+     Body centre above a surface when standing: 0.02 (half plate) + 0.20 (gear) = 0.22 m. -->
+<robot name="s500">
+  <material name="body"><color rgba="0.15 0.15 0.18 1"/></material>
+  <material name="arm"><color rgba="0.92 0.92 0.92 1"/></material>
+  <material name="prop"><color rgba="0.2 0.5 0.9 0.5"/></material>
+  <material name="gear"><color rgba="0.1 0.1 0.1 1"/></material>
+  <link name="base_link">
+    <inertial><origin xyz="0 0 0"/><mass value="1.24"/>
+      <inertia ixx="0.0134" ixy="0" ixz="0" iyy="0.0144" iyz="0" izz="0.0138"/></inertial>
+    <!-- body plate and arms (motor centres at +-0.177, +-0.177) -->
+    <visual><geometry><box size="0.14 0.14 0.04"/></geometry><material name="body"/></visual>
+    <visual><origin xyz="0 0 0.01" rpy="0 0 0.7854"/><geometry><box size="0.50 0.04 0.02"/></geometry><material name="arm"/></visual>
+    <visual><origin xyz="0 0 0.01" rpy="0 0 -0.7854"/><geometry><box size="0.50 0.04 0.02"/></geometry><material name="arm"/></visual>
+    <visual><origin xyz="0.177 0.177 0.035"/><geometry><cylinder radius="0.127" length="0.004"/></geometry><material name="prop"/></visual>
+    <visual><origin xyz="0.177 -0.177 0.035"/><geometry><cylinder radius="0.127" length="0.004"/></geometry><material name="prop"/></visual>
+    <visual><origin xyz="-0.177 0.177 0.035"/><geometry><cylinder radius="0.127" length="0.004"/></geometry><material name="prop"/></visual>
+    <visual><origin xyz="-0.177 -0.177 0.035"/><geometry><cylinder radius="0.127" length="0.004"/></geometry><material name="prop"/></visual>
+    <!-- landing gear: 4 struts down to 2 skids along x -->
+    <visual><origin xyz="0.06 0.11 -0.116"/><geometry><cylinder radius="0.006" length="0.192"/></geometry><material name="gear"/></visual>
+    <visual><origin xyz="-0.06 0.11 -0.116"/><geometry><cylinder radius="0.006" length="0.192"/></geometry><material name="gear"/></visual>
+    <visual><origin xyz="0.06 -0.11 -0.116"/><geometry><cylinder radius="0.006" length="0.192"/></geometry><material name="gear"/></visual>
+    <visual><origin xyz="-0.06 -0.11 -0.116"/><geometry><cylinder radius="0.006" length="0.192"/></geometry><material name="gear"/></visual>
+    <visual><origin xyz="0 0.11 -0.212" rpy="0 1.5708 0"/><geometry><capsule radius="0.008" length="0.224"/></geometry><material name="gear"/></visual>
+    <visual><origin xyz="0 -0.11 -0.212" rpy="0 1.5708 0"/><geometry><capsule radius="0.008" length="0.224"/></geometry><material name="gear"/></visual>
+    <!-- collision: plate, arms, struts, skids (props are not solid) -->
+    <collision><geometry><box size="0.14 0.14 0.04"/></geometry></collision>
+    <collision><origin xyz="0 0 0.01" rpy="0 0 0.7854"/><geometry><box size="0.50 0.04 0.02"/></geometry></collision>
+    <collision><origin xyz="0 0 0.01" rpy="0 0 -0.7854"/><geometry><box size="0.50 0.04 0.02"/></geometry></collision>
+    <collision><origin xyz="0.06 0.11 -0.116"/><geometry><cylinder radius="0.006" length="0.192"/></geometry></collision>
+    <collision><origin xyz="-0.06 0.11 -0.116"/><geometry><cylinder radius="0.006" length="0.192"/></geometry></collision>
+    <collision><origin xyz="0.06 -0.11 -0.116"/><geometry><cylinder radius="0.006" length="0.192"/></geometry></collision>
+    <collision><origin xyz="-0.06 -0.11 -0.116"/><geometry><cylinder radius="0.006" length="0.192"/></geometry></collision>
+    <collision><origin xyz="0 0.11 -0.212" rpy="0 1.5708 0"/><geometry><capsule radius="0.008" length="0.224"/></geometry></collision>
+    <collision><origin xyz="0 -0.11 -0.212" rpy="0 1.5708 0"/><geometry><capsule radius="0.008" length="0.224"/></geometry></collision>
+  </link>
+</robot>
