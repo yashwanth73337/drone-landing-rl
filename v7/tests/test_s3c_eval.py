@@ -2,7 +2,7 @@
 
   1. Wilson interval (same numbers as the S2b study)
   2. end to end with an UNTRAINED student (random weights), 1 flight on the straight path,
-     1 worker: the env has the student rules (45 deg, shield 0.8, touch detector), the record
+     1 worker: the env has the student rules (config camera angle, shield 0.8, touch detector), the record
      has every field, the files are written and the summary re-reads them
 Run:  python -m pytest -q -s v7/tests/test_s3c_eval.py
 """
@@ -36,7 +36,7 @@ def test_end_to_end(tmp_path, monkeypatch):
     monkeypatch.setattr(C, "make_env", spy)
     recs = EV.main(["--ckpt", str(ck), "--n", "1", "--paths", "straight", "--workers", "1",
                     "--device", "cpu"])
-    assert seen_env == dict(pitch=45.0, shield=0.8, touch="sensor", v_max=9.0, rate=0.3)
+    assert seen_env == dict(pitch=C.PITCH_DEG, shield=0.8, touch="sensor", v_max=9.0, rate=0.3)
     r = recs[0]
     print(f"\n[dev] untrained student: {r}")
     keys = {"mode", "seed", "outcome", "t", "landed_by", "impact", "pad_v_start", "pad_v_mean",

@@ -1,6 +1,6 @@
 """v7 S3a tests (20 Nov 2026): fixed settings, V7 troubles, demo recorder.
 
-  1. v7.config: the fixed settings reach the env (45 deg, 3 m/s^2, 9 m/s, 60 s); the
+  1. v7.config: the fixed settings reach the env (60 deg since 20 Nov 22:00, 3 m/s^2, 9 m/s, 60 s); the
      student rules add the shield 0.8 and the touch detector
   2. troubles use the V7 speed scale: a 1.5 to 2 m/s push is 1.5 to 2 m/s with +-10 m/s
   3. troubles use the S500's TRUE lowest point: a drone leaning 15 deg with its centre-formula
@@ -32,12 +32,12 @@ def env():
 
 # ---------------------------------------------------------------- 1. fixed settings
 def test_fixed_settings(env):
-    assert (C.PITCH_DEG, C.RATE_XY, C.V_MAX, C.HORIZON) == (45.0, 0.3, 9.0, 600)
-    assert env.world.cam.pitch_deg == 45.0 and env.rate_lim[0] == 0.3 and env.v_max == 9.0
+    assert (C.PITCH_DEG, C.RATE_XY, C.V_MAX, C.HORIZON) == (60.0, 0.3, 9.0, 600)   # 60 since 20 Nov 22:00
+    assert env.world.cam.pitch_deg == C.PITCH_DEG and env.rate_lim[0] == 0.3 and env.v_max == 9.0
     assert env.drop_shield is None and env.world.touch == "perfect"        # demo recording
     e2 = C.make_env(student_rules=True, renderer="tiny", seed=0)
     try:
-        assert e2.drop_shield == 0.8 and e2.world.touch == "sensor" and e2.world.cam.pitch_deg == 45.0
+        assert e2.drop_shield == 0.8 and e2.world.touch == "sensor" and e2.world.cam.pitch_deg == C.PITCH_DEG
     finally:
         e2.close()
 

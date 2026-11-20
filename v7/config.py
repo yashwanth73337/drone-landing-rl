@@ -1,8 +1,15 @@
 """v7: the FIXED V7 settings (decided by Yashwanth on 20 Nov 2026 from the S2 teacher study).
 
   setting                     value   from
-  camera (gimbal) pitch       45 deg  S2 images check: 100/100 safe at 45 and 60; pad in view
-                                      74.6 % vs 64.2 %; S1c: markers read better near the drop
+  camera (gimbal) pitch       60 deg  CHANGED 20 Nov 22:00 from 45 (his decision). S2: teacher
+                                      100/100 with images at both; pad in view 64 % (60) vs 75 %
+                                      (45). But the 45 deg student (BC + 3 DAgger rounds, blind
+                                      mask) stayed at 0 to 1/400 on dev: near the pad a ~1 m slip
+                                      puts the pad under/behind a 45 deg camera (its lower edge is
+                                      13 deg short of straight down) and it never finds it again.
+                                      60 deg sees straight down. The 45 deg runs stay in
+                                      v7/results/{demos, bc_data, dagger*, runs/bc_v7, dagger_r*};
+                                      60 deg runs go to v7/results/p60/ and runs/*_p60.
   speed-change limit          0.3 m/s per decision = 3 m/s^2   (5 m/s^2: 2 to 2.5 x tip-overs)
   pad top speed               9 m/s   (teacher 98.85 % safe on 2000 fresh flights)
   flight-time limit           60 s    (600 decisions; longest safe teacher flight 54.8 s)
@@ -13,7 +20,7 @@ Every V7 script after S2 builds its env with make_env(), so the settings live in
 """
 from .envs import world_v7 as W7
 
-PITCH_DEG = 45.0
+PITCH_DEG = 60.0
 RATE_XY = 0.3
 V_MAX = 9.0
 HORIZON = W7.HORIZON            # 600 decisions = 60 s
