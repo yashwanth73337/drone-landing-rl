@@ -8,6 +8,12 @@ behind the 45 deg camera and flies on at ~9 m/s; the teacher would say "go back"
 
 The V6 method (v6_drop/scripts/dagger_collect.py, decided 29 Oct) with the V7 parts:
   D1 pure DAgger: the student flies the WHOLE flight; the teacher never takes the controls
+     (S4b, 20 Nov: --beta adds beta MIXING. At every step the TEACHER's action is flown with
+     chance beta, else the student's (Ross et al. 2011, beta_1 = 1 decaying). Round 1 with
+     pure DAgger gave 1/400 on dev: the student never reached the pad, so the data held no
+     approach, descent or drop states. Plan: round 2 beta 0.5, round 3 0.25, round 4 0.
+     The coin per step comes from the flight's own random stream (seed), so a flight is
+     reproducible. The label is always the teacher's; flag = 5 on teacher-flown steps.)
   D2 after each round: continue training from the last student (last.pt), 8 epochs, all data
   D3 no troubles: the student's own mistakes are the troubles now
   ALL flights are kept (failures too: their states are exactly what is needed)
@@ -26,6 +32,7 @@ worker (one thread), so the GPU is left to the renderer.
 Run (repo root; charger in; performance mode):
   nohup python -m v7.scripts.dagger_collect_v7 --ckpt v7/results/runs/bc_v7/last.pt \\
         --round 1 --flights 300 --workers 6 > v7/results/dagger_r1_collect.log 2>&1 &
+  round 2 with beta mixing: ... --ckpt v7/results/runs/dagger_r1/last.pt --round 2 --beta 0.5
 Watch:  tail -f v7/results/dagger_r1_collect.log | grep --line-buffered -E "^\\[(w|dag)"
 Stop:   pkill -f "v7.scripts.dagger_collect_v7"
 Output: v7/results/dagger/r<round>/ (git-ignored): dagger_w*.npz, flights.csv, summary.txt
@@ -47,6 +54,7 @@ SEED0 = 600000
 EP_PER_ROUND = 10000
 FLUSH_EVERY = 20                          # flights per .npz file
 KEYS = ("image", "state", "priv", "move", "drop", "flown", "flag", "phase", "t", "ep")
+FLAG_TEACHER = 5                          # flag code: the teacher's action was flown (beta)
 
 
 def episode_id(rnd, i):
@@ -54,10 +62,13 @@ def episode_id(rnd, i):
     return rnd * EP_PER_ROUND + i
 
 
-def fly_dagger(env, model, teacher, ep, device="cpu"):
-    """One DAgger flight: the student flies, the teacher labels. Returns (rec, row)."""
+def fly_dagger(env, model, teacher, ep, device="cpu", beta=0.0):
+    """One DAgger flight: the student flies (the teacher with chance beta per step), the
+    teacher labels. Returns (rec, row)."""
     import torch
     seed = SEED0 + ep
+    coin = np.random.default_rng([seed, 5])
+    n_teacher = 0
     obs, info0 = env.reset(seed=seed, options=dict(mode="random"))
     teacher.reset()
     rec = {k: [] for k in KEYS}
@@ -65,20 +76,24 @@ def fly_dagger(env, model, teacher, ep, device="cpu"):
     with torch.no_grad():
         while True:
             label, ti = teacher.act(env)               # the teacher's answer HERE
-            act, hc, p = model.act(obs, hc, device)    # what the student does
+            act, hc, p = model.act(obs, hc, device)    # what the student does (memory always runs)
+            by_teacher = beta > 0.0 and coin.random() < beta
+            flown = {"move": np.asarray(label["move"], np.float32), "drop": int(label["drop"])} \
+                if by_teacher else {"move": act["move"], "drop": act["drop"]}
+            n_teacher += by_teacher
             rec["image"].append(obs["image"])
             rec["state"].append(obs["state"])
             rec["priv"].append(obs["priv"])
             rec["move"].append(np.asarray(label["move"], np.float32))
             rec["drop"].append(int(label["drop"]))
-            rec["flown"].append(np.asarray(act["move"], np.float32))
-            rec["flag"].append(0)
+            rec["flown"].append(np.asarray(flown["move"], np.float32))
+            rec["flag"].append(FLAG_TEACHER if by_teacher else 0)
             rec["phase"].append(PHASES.index(ti["phase"]))
             rec["t"].append(env.world.t)
             rec["ep"].append(ep)
             err.append(np.abs(np.asarray(act["move"]) - label["move"]) * env.act_scale)
             p_max = max(p_max, p)
-            obs, r, term, trunc, info = env.step({"move": act["move"], "drop": act["drop"]})
+            obs, r, term, trunc, info = env.step(flown)
             rt = info.get("reward_terms") or {}
             if rt.get("seen") is not None:
                 n_rt += 1
@@ -88,7 +103,8 @@ def fly_dagger(env, model, teacher, ep, device="cpu"):
     td = info.get("touchdown") or {}
     err = np.array(err)
     pad = info["pad"]
-    row = dict(ep=ep, seed=seed, outcome=info["outcome"], steps=len(rec["t"]),
+    row = dict(ep=ep, seed=seed, beta=beta, teacher_share=round(n_teacher / len(rec["t"]), 3),
+               outcome=info["outcome"], steps=len(rec["t"]),
                time_s=round(len(rec["t"]) * 0.1, 1),
                pad_v_start=round(pad["v_start"], 3), pad_v_max=round(pad["v_max"], 3),
                reason=td.get("reason"),
@@ -101,7 +117,7 @@ def fly_dagger(env, model, teacher, ep, device="cpu"):
     return rec, row
 
 
-def worker(w, n_workers, rnd, flights, ckpt, out, renderer, q):
+def worker(w, n_workers, rnd, flights, ckpt, out, renderer, q, beta=0.0):
     import torch
     torch.set_num_threads(1)
     from v6_drop.scripts.eval_student import load
@@ -115,7 +131,7 @@ def worker(w, n_workers, rnd, flights, ckpt, out, renderer, q):
     mine = [i for i in range(flights) if i % n_workers == w]
     try:
         for j, i in enumerate(mine):
-            rec, row = fly_dagger(env, model, teacher, episode_id(rnd, i))
+            rec, row = fly_dagger(env, model, teacher, episode_id(rnd, i), beta=beta)
             rows.append(row)
             for k in KEYS:
                 buf[k].extend(rec[k])
@@ -127,7 +143,7 @@ def worker(w, n_workers, rnd, flights, ckpt, out, renderer, q):
                 n_buf = 0
             if (j + 1) % 10 == 0 or j + 1 == len(mine):
                 safe = sum(r["outcome"] == "success" for r in rows)
-                print(f"[w{w}] {j + 1}/{len(mine)} flights, student safe {safe}, "
+                print(f"[w{w}] {j + 1}/{len(mine)} flights, safe {safe}, "
                       f"{(time.time() - t0) / (j + 1):.1f} s/flight", flush=True)
         if n_buf:
             save_chunk(buf, os.path.join(out, f"dagger_w{w}_{chunk:03d}.npz"))
@@ -148,10 +164,12 @@ def summarize(rows, out, ckpt, rnd):
         outs[r["outcome"]] = outs.get(r["outcome"], 0) + 1
     safe = [r for r in rows if r["outcome"] == "success"]
     steps = sum(r["steps"] for r in rows)
+    beta = rows[0]["beta"]
     lines = [f"V7 DAgger round {rnd}: student {os.path.abspath(ckpt)} flew {n} flights "
-             f"(seeds {rows[0]['seed']}..{rows[-1]['seed']}), all kept",
+             f"(seeds {rows[0]['seed']}..{rows[-1]['seed']}), all kept; beta {beta:g} (teacher flew "
+             f"{100 * np.mean([r['teacher_share'] for r in rows]):.0f} % of the steps)",
              f"samples {steps:,} (mean {steps / n:.0f} per flight)",
-             f"student safe {len(safe)}/{n} = {100 * len(safe) / n:.1f}% "
+             f"{'mixed flights' if beta > 0 else 'student'} safe {len(safe)}/{n} = {100 * len(safe) / n:.1f}% "
              f"(by drop {sum(r['reason'] == 'drop' for r in safe)}, by auto-cut "
              f"{sum(r['reason'] == 'auto_cut' for r in safe)})",
              f"outcomes: {outs}",
@@ -178,7 +196,10 @@ def main(argv=None):
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--renderer", choices=["egl", "tiny"], default="egl")
     ap.add_argument("--out", default=None, help="default v7/results/dagger/r<round>")
+    ap.add_argument("--beta", type=float, default=0.0,
+                    help="chance per step that the TEACHER's action is flown (0 = pure DAgger)")
     a = ap.parse_args(argv)
+    assert 0.0 <= a.beta <= 1.0, a.beta
     out = a.out or os.path.join(OUT, f"r{a.round}")
     if glob.glob(os.path.join(out, "dagger_*.npz")):
         raise SystemExit(f"{out} already has data; delete it first (rm -rf {out})")
@@ -186,7 +207,8 @@ def main(argv=None):
     ctx = mp.get_context("spawn")
     q = ctx.Queue()
     t0 = time.time()
-    procs = [ctx.Process(target=worker, args=(w, a.workers, a.round, a.flights, a.ckpt, out, a.renderer, q))
+    procs = [ctx.Process(target=worker, args=(w, a.workers, a.round, a.flights, a.ckpt, out, a.renderer, q,
+                                              a.beta))
              for w in range(a.workers)]
     for pr in procs:
         pr.start()

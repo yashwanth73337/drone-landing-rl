@@ -77,3 +77,30 @@ def test_script_and_dataset(ckpt, tmp_path):
     d = Demos([str(tmp_path / "bc_data"), str(tmp_path / "dagger_data_r1")])
     assert sorted(d.ep.tolist()) == [1, 10000, 10001]
     assert d.val.tolist().count(True) == 1                  # 10000 % 10 == 0 -> validation
+
+
+# ---------------------------------------------------------------- S4b: beta mixing
+@pytest.mark.parametrize("beta", [1.0, 0.5])
+def test_beta_mixing(ckpt, beta):
+    """beta 1: the teacher flies every step (flown == label, flag 5) and lands safely;
+    beta 0.5: about half the steps; the label is always the teacher's."""
+    from v6_drop.scripts.eval_student import load
+    model, _ = load(ckpt, "cpu")
+    runs = []
+    for _ in range(2):            # a FRESH env each time: the ground's faint shadow ripple in the
+        env = C.make_env(renderer="egl", seed=0)      # picture depends on what the renderer drew
+        try:                                          # before (PyBullet; V6 too), not the physics
+            runs.append(D.fly_dagger(env, model, TeacherV7(), D.episode_id(2, 1), beta=beta))
+        finally:
+            env.close()
+    (rec, row), (rec2, row2) = runs
+    flag = np.array(rec["flag"])
+    tf = flag == D.FLAG_TEACHER
+    print(f"\n[beta {beta}] {row['outcome']}, teacher share {row['teacher_share']}, steps {row['steps']}")
+    assert np.allclose(np.array(rec["flown"])[tf], np.array(rec["move"])[tf])
+    assert row["teacher_share"] == pytest.approx(tf.mean(), abs=1e-3)
+    assert row == row2                                       # reproducible coin
+    if beta == 1.0:
+        assert tf.all() and row["outcome"] == "success"
+    else:
+        assert 0.35 < tf.mean() < 0.65
