@@ -19,8 +19,10 @@ the Wilson 95 % interval, failure kinds, longest and 99th-percentile flight time
 Run (laptop, charger in, `powerprofilesctl set performance`):
   python -m v7.scripts.teacher_study_v7 --stage grid --n 200 --workers 8
   python -m v7.scripts.teacher_study_v7 --stage check --rate 0.3 --vmax 9 --n 500 --workers 8
-  python -m v7.scripts.teacher_study_v7 --stage images --rate 0.3 --vmax 9 --n 25 --workers 4
-Output: v7/results/teacher_study/<stage>[_r<rate>_v<vmax>].jsonl (one line per flight) and
+  python -m v7.scripts.teacher_study_v7 --stage images --rate 0.3 --vmax 9 --pitch 45 --n 25 --workers 4
+--pitch: the camera angle of the env (45 or 60, default 60). It matters only for the
+images stage (marker reading, touch detector, shield); headless stages count both angles.
+Output: v7/results/teacher_study/<stage>[_r<rate>_v<vmax>][_p<pitch>].jsonl (one line per flight) and
 .txt (the summary table). --summary-only re-prints the table from the .jsonl.
 """
 import argparse
@@ -62,7 +64,9 @@ def run_task(task):
 
     images = task["stage"] == "images"
     kw = dict(touch="sensor", drop_shield=0.8) if images else dict(headless=True)
-    env = LandingEnvV7(renderer="egl", seed=7, rate_xy=task["rate"], v_max=task["vmax"], **kw)
+    pitch = task.get("pitch", 60.0)
+    env = LandingEnvV7(renderer="egl", seed=7, rate_xy=task["rate"], v_max=task["vmax"],
+                       pitch_deg=pitch, **kw)
     cams = {a: GimbalCamera(env.world.cid, pitch_deg=a, renderer="egl") for a in (60, 45)}
     teacher = TeacherV7()
     out = []
@@ -93,7 +97,8 @@ def run_task(task):
                     break
             td = info.get("touchdown") or {}
             out.append(dict(
-                stage=task["stage"], rate=task["rate"], vmax=task["vmax"], mode=task["mode"],
+                stage=task["stage"], rate=task["rate"], vmax=task["vmax"], pitch=pitch,
+                mode=task["mode"],
                 seed=int(seed), outcome=info["outcome"], t=int(info["t"]),
                 pad_v_start=round(float(info["pad"]["v_start"]), 3),
                 pad_v_mean=round(float(info["pad"]["v_mean"]), 3),
@@ -115,7 +120,8 @@ def summarize(recs):
     settings = sorted({(r["rate"], r["vmax"]) for r in recs}, key=lambda x: (x[0], -x[1]))
     for rate, vmax in settings:
         rs = [r for r in recs if r["rate"] == rate and r["vmax"] == vmax]
-        lines.append(f"\n=== speed-change limit {rate * 10:.0f} m/s^2, pad top speed {vmax:g} m/s "
+        cam = (f", camera {rs[0].get('pitch', 60.0):g} deg" if rs[0]["stage"] == "images" else "")
+        lines.append(f"\n=== speed-change limit {rate * 10:.0f} m/s^2, pad top speed {vmax:g} m/s{cam} "
                      f"({len(rs)} flights) ===")
         lines.append(f"{'path':9s} {'safe':>9s} {'95% interval':>14s} {'t max':>6s} {'t p99':>6s} "
                      f"{'view60':>7s} {'view45':>7s} {'blind60':>8s} {'blind45':>8s}  failures")
@@ -149,7 +155,8 @@ def summarize(recs):
 def out_name(args):
     if args.stage == "grid":
         return os.path.join(OUT_DIR, "grid")
-    return os.path.join(OUT_DIR, f"{args.stage}_r{args.rate[0]:g}_v{args.vmax[0]:g}")
+    name = f"{args.stage}_r{args.rate[0]:g}_v{args.vmax[0]:g}"
+    return os.path.join(OUT_DIR, name + (f"_p{args.pitch:g}" if args.stage == "images" else ""))
 
 
 def main(argv=None):
@@ -157,6 +164,8 @@ def main(argv=None):
     ap.add_argument("--stage", choices=("grid", "check", "images"), required=True)
     ap.add_argument("--rate", type=float, nargs="+", default=None, help="0.3 and/or 0.5")
     ap.add_argument("--vmax", type=float, nargs="+", default=None, help="9 and/or 8")
+    ap.add_argument("--pitch", type=float, default=60.0, choices=(45.0, 60.0),
+                    help="camera angle of the env (images stage)")
     ap.add_argument("--n", type=int, default=200, help="flights per path per setting")
     ap.add_argument("--paths", nargs="+", default=list(PATHS))
     ap.add_argument("--workers", type=int, default=8)
@@ -178,7 +187,7 @@ def main(argv=None):
         return recs
 
     seeds = [SEED0[args.stage] + i for i in range(args.n)]
-    tasks = [dict(stage=args.stage, rate=r, vmax=v, mode=m, seeds=seeds[i:i + CHUNK])
+    tasks = [dict(stage=args.stage, rate=r, vmax=v, pitch=args.pitch, mode=m, seeds=seeds[i:i + CHUNK])
              for r in args.rate for v in args.vmax for m in args.paths
              for i in range(0, len(seeds), CHUNK)]
     total = sum(len(t["seeds"]) for t in tasks)
