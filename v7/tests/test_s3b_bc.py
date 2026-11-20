@@ -5,6 +5,8 @@
   3. end to end: 2 recorded V7 demos (one train, one validation episode) -> V6 dataset
      builder -> 1 short BC epoch on the CPU -> best.pt, last.pt, log.csv, config.json in
      <results>/runs/<name>; the V6 trainer's own numbers are V7 while it runs
+  4. S4c blind mask: steps out of view for more than N s get mask 0 (per episode, the
+     count restarts at each episode); clips carry it; --blind-mask writes v7_config.json
 Run:  python -m pytest -q -s v7/tests/test_s3b_bc.py
 """
 import csv
@@ -73,3 +75,26 @@ def test_end_to_end(tmp_path, monkeypatch):
     assert float(row["val_move_mae_vx"]) >= 0
     assert np.array_equal(B6.ACT_SCALE, T7.ACT_SCALE) and B6.feet_height is T7.feet_height
     assert os.path.normpath(B6.RESULTS) == os.path.normpath(str(tmp_path))
+    assert json.load(open(out / "v7_config.json"))["blind_mask_s"] is None
+    # S4c: the same data with the blind mask
+    T7.main(["--name", "tm", "--data", str(data), "--epochs", "1", "--max-clips", "3",
+             "--device", "cpu", "--batch", "2", "--blind-mask", "3"])
+    vc = json.load(open(tmp_path / "runs" / "tm" / "v7_config.json"))
+    print(f"[bc] blind mask 3 s: masked share {vc['masked_share']}")
+    assert vc["blind_mask_s"] == 3.0 and 0.0 <= vc["masked_share"] < 0.5
+
+
+def test_blind_mask_logic(monkeypatch):
+    from v7.scripts import diag_view_v7 as DV
+
+    class FakeDemos:
+        a = {"priv": np.zeros((70, 8)), "state": np.zeros((70, 11))}
+        start = np.array([0, 50])
+        length = np.array([50, 20])
+    vis = np.ones(70, bool)
+    vis[5:50] = False                   # episode 0: seen 0..4, then blind 4.5 s
+    vis[50:52] = False                  # episode 1: blind at its start (count restarts)
+    monkeypatch.setattr(DV, "in_view", lambda cam, priv, state: vis)
+    k = T7.known_steps(FakeDemos(), 3.0)
+    assert k[:35].all() and not k[35:50].any()          # blind steps 1..30 kept, 31+ masked
+    assert not k[50:52].any() and k[52:].all()          # no 'seen' yet at the start -> masked
