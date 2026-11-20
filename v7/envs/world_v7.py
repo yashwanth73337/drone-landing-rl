@@ -1,4 +1,4 @@
-"""v7 S1d: the V7 world (20 Nov 2026).
+"""v7 S1d: the V7 world (20 Nov 2026; referee fix in S2a, D3).
 
 Same rules as the V6 world (v6_drop/envs/world.py: flight checks, drop, touch detector,
 referee with the five landing checks, start rules). Changed parts only:
@@ -20,6 +20,8 @@ referee with the five landing checks, start rules). Changed parts only:
   true_state        pad centre and velocity           + pad acceleration, turn rate, heading,
                                                       speed, driver phase (teacher, S2)
   info["pad"]       (none)                            mode, start / mean / max / end speed
+  referee check 5   "still": drone vs pad CENTRE      drone vs the pad point UNDER the drone
+                    velocity (pad never turned)       (centre velocity + turn; S2a fix, D3)
 
 Start rules: the same values as V6 (height U(2, 5) m, offset +-3 m, yaw +-10 deg from the
 pad heading, speed +-1 m/s, turn rate +-10 deg/s, pad centre in view, >= 1 marker seen).
@@ -229,6 +231,27 @@ class WorldV7(W6.World):
         return dict(mode=ps["mode"], v_start=ps["v_start"],
                     v_mean=ps["v_sum"] / ps["n"] if ps["n"] else ps["v_start"],
                     v_max=ps["v_max_seen"], v_end=float(self.plat.v), phase=self.plat.phase)
+
+    # ---- referee check 5 on a TURNING pad (S2a fix, 20 Nov) ---------------------------
+    def pad_point_velocity(self, p):
+        """World velocity of the pad surface point under p (pad centre velocity + turn)."""
+        r = np.asarray(p, float) - self.plat.pad_center()
+        w = float(self.plat.w)
+        return self.plat.velocity() + np.array([-w * r[1], w * r[0], 0.0])
+
+    def _touchdown_phase(self, **kw):
+        """V6 referee. Check 5 ("still on the pad after 2 s") compared the drone with the pad
+        CENTRE's velocity: right for V6 (the pad never turned), wrong for V7. A drone resting
+        0.2 m off-centre on a pad turning at 0.5 rad/s moves 0.1 m/s relative to the centre
+        and failed (found 20 Nov, S2a). V7 compares with the pad point under the drone."""
+        out = super()._touchdown_phase(**kw)
+        if out["outcome"] in ("success", "not_still"):
+            td = out["touchdown"]
+            s = self.true_state()
+            td["v_rel_end_centre"] = td["v_rel_end"]
+            td["v_rel_end"] = float(np.linalg.norm(s["v"] - self.pad_point_velocity(s["pos"])))
+            out["outcome"] = "not_still" if td["v_rel_end"] > W6.V_STILL else "success"
+        return out
 
     # ---- geometry --------------------------------------------------------------------
     def _lowest_z(self):
