@@ -12,6 +12,10 @@ Part B (closed loop): the student flies 3 dev flights alone on a slow straight p
 speed 2 m/s), with the student rules. Every 0.5 s: where the drone is in the pad's frame
 (x ahead, y left, m), the skid height, the student's command and what the TEACHER would
 command in that same moment (m/s; heading frame), marker seen, drop chance.
+21 Nov: also the HEADING error (drone nose vs pad heading, deg) and both yaw-rate commands
+(deg/s): the gimbal camera turns with the nose, and the speed commands are in the nose's
+frame, so a drifting heading would hide the pad AND point every command the wrong way.
+--pad-speed and --mode choose the pad for Part B; --skip-a skips Part A.
 
 Run (repo root):
   python -m v7.scripts.diag_student_v7 --ckpt v7/results/runs/bc_v7/last.pt
@@ -62,24 +66,25 @@ def part_a(model, data, device, scale, max_eps=None):
     return lines
 
 
-def part_b(model, device, seeds, every=5):
+def part_b(model, device, seeds, every=5, pad_speed=2.0, mode="straight"):
     from v7.config import make_env
     from v7.envs.platform_v7 import PAD_TOP_Z
     from v7.envs.s500 import lowest_z
     from v7.experts.teacher_v7 import TeacherV7
     env = make_env(student_rules=True, renderer="egl", seed=7)
-    lines = ["", "Part B: the student flies alone; slow straight pad (start 2 m/s); every 0.5 s.",
+    lines = ["", f"Part B: the student flies alone; {mode} pad (start {pad_speed:g} m/s); every 0.5 s.",
              "  pad frame: x = ahead of the pad centre (+) / behind (-), y = left (+); height = skids",
-             "  commands in m/s (vx forward, vy left, vz up), heading frame"]
+             "  commands in m/s (vx forward, vy left, vz up), heading frame; hdg = nose minus pad"
+             " heading (deg); yaw = yaw-rate command student/teacher (deg/s)"]
     try:
         for seed in seeds:
-            obs, _ = env.reset(seed=seed, options=dict(mode="straight", pad_speed=2.0))
+            obs, _ = env.reset(seed=seed, options=dict(mode=mode, pad_speed=pad_speed))
             teacher = TeacherV7()
             teacher.reset()
             hc, k, first_bad = None, 0, None
             lines.append(f"\n  seed {seed}")
             lines.append(f"  {'t s':>5s} {'x':>6s} {'y':>6s} {'height':>6s} | {'student vx':>10s} {'vy':>5s} "
-                         f"{'vz':>5s} | {'teacher vx':>10s} {'vy':>5s} {'vz':>5s} | seen  drop%")
+                         f"{'vz':>5s} | {'teacher vx':>10s} {'vy':>5s} {'vz':>5s} | {'hdg':>5s} {'yaw s/t':>9s} | seen  drop%")
             while True:
                 s = env.world.true_state()
                 act, hc, p = model.act(obs, hc, device)
@@ -92,8 +97,11 @@ def part_b(model, device, seeds, every=5):
                     xy = env.world.plat.world_to_pad(s["pos"][None, :])[0]
                     h = lowest_z(s["R"], s["pos"]) - PAD_TOP_Z
                     seen = (env.last_meas is not None and bool(env.last_meas.ids))
+                    yaw = np.arctan2(s["R"][1, 0], s["R"][0, 0])
+                    hdg = np.degrees((yaw - s["pad_psi"] + np.pi) % (2 * np.pi) - np.pi)
                     lines.append(f"  {k / 10:5.1f} {xy[0]:6.1f} {xy[1]:6.1f} {h:6.2f} | {cs[0]:10.2f} {cs[1]:5.2f} "
-                                 f"{cs[2]:5.2f} | {ct[0]:10.2f} {ct[1]:5.2f} {ct[2]:5.2f} | {'yes' if seen else ' no'}  "
+                                 f"{cs[2]:5.2f} | {ct[0]:10.2f} {ct[1]:5.2f} {ct[2]:5.2f} | {hdg:5.0f} "
+                                 f"{np.degrees(cs[3]):4.0f}/{np.degrees(ct[3]):<4.0f} | {'yes' if seen else ' no'}  "
                                  f"{100 * p:4.0f}")
                 obs, _, term, trunc, info = env.step(act)
                 k += 1
@@ -115,16 +123,22 @@ def main(argv=None):
     ap.add_argument("--data", default=os.path.join("v7", "results", "bc_data"))
     ap.add_argument("--seeds", type=int, nargs="+", default=[30000, 30001, 30002])
     ap.add_argument("--max-eps", type=int, default=None, help="tests: limit Part A flights")
+    ap.add_argument("--pad-speed", type=float, default=2.0)
+    ap.add_argument("--mode", default="straight")
+    ap.add_argument("--skip-a", action="store_true")
+    ap.add_argument("--tag", default="", help="added to the output file name")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     a = ap.parse_args(argv)
     model, _ = load(a.ckpt, a.device)
     scale = np.array([VXY_MAX, VXY_MAX, VZ_MAX, YAW_RATE_MAX])
     lines = [f"Diagnostic of {a.ckpt}"]
-    lines += part_a(model, a.data, a.device, scale, a.max_eps)
+    if not a.skip_a:
+        lines += part_a(model, a.data, a.device, scale, a.max_eps)
     print("\n".join(lines), flush=True)
-    lb = part_b(model, a.device, a.seeds)
+    lb = part_b(model, a.device, a.seeds, pad_speed=a.pad_speed, mode=a.mode)
     print("\n".join(lb), flush=True)
-    out = os.path.join(os.path.dirname(a.ckpt), f"diag_{os.path.splitext(os.path.basename(a.ckpt))[0]}.txt")
+    out = os.path.join(os.path.dirname(a.ckpt),
+                       f"diag_{os.path.splitext(os.path.basename(a.ckpt))[0]}{a.tag}.txt")
     open(out, "w").write("\n".join(lines + lb) + "\n")
     print(f"\nsaved {out}", flush=True)
     return lines + lb
