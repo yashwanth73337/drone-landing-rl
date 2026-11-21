@@ -22,8 +22,16 @@ Run (laptop, charger in, `powerprofilesctl set performance`):
   python -m v7.scripts.teacher_study_v7 --stage images --rate 0.3 --vmax 9 --pitch 45 --n 25 --workers 4
 --pitch: the camera angle of the env (45 or 60, default 60). It matters only for the
 images stage (marker reading, touch detector, shield); headless stages count both angles.
-Output: v7/results/teacher_study/<stage>[_r<rate>_v<vmax>][_p<pitch>].jsonl (one line per flight) and
-.txt (the summary table). --summary-only re-prints the table from the .jsonl.
+Output: v7/results/teacher_study/<stage>[_r<rate>_v<vmax>][_p<pitch>][_view].jsonl (one line per flight)
+and .txt (the summary table). --summary-only re-prints the table from the .jsonl.
+
+S2' (21 Nov): --teacher view flies the VIEW-KEEPING teacher (v7/experts/teacher_view_v7.py,
+tuned for the env's camera angle --pitch); output names get "_view". Every flight now also
+records far60 / far45: the share of the FAR steps (pad centre > 3 m away horizontally) with
+the pad centre in the picture (flights without far steps are left out of the mean; the near-pad part is under the camera by design; the marker
+grid covers it). Old .jsonl files without far60 print "-".
+  python -m v7.scripts.teacher_study_v7 --stage check --teacher view --n 500 --workers 8
+  python -m v7.scripts.teacher_study_v7 --stage images --teacher view --pitch 60 --n 25 --workers 4
 """
 import argparse
 import json
@@ -61,6 +69,7 @@ def run_task(task):
     from v7.envs.gimbal_camera import GimbalCamera
     from v7.envs.landing_env_v7 import LandingEnvV7
     from v7.experts.teacher_v7 import TeacherV7
+    from v7.experts.teacher_view_v7 import TeacherV7View
 
     images = task["stage"] == "images"
     kw = dict(touch="sensor", drop_shield=0.8) if images else dict(headless=True)
@@ -68,7 +77,8 @@ def run_task(task):
     env = LandingEnvV7(renderer="egl", seed=7, rate_xy=task["rate"], v_max=task["vmax"],
                        pitch_deg=pitch, **kw)
     cams = {a: GimbalCamera(env.world.cid, pitch_deg=a, renderer="egl") for a in (60, 45)}
-    teacher = TeacherV7()
+    kind = task.get("teacher", "v7")
+    teacher = TeacherV7View(pitch_deg=pitch) if kind == "view" else TeacherV7()
     out = []
     try:
         for seed in task["seeds"]:
@@ -78,13 +88,17 @@ def run_task(task):
             seen = {60: 0, 45: 0}
             blind = {60: 0, 45: 0}
             blind_max = {60: 0, 45: 0}
+            far_n, far_seen = 0, {60: 0, 45: 0}
             while True:
                 s = env.world.true_state()
+                far = bool(np.hypot(*(s["pad_center"] - s["pos"])[:2]) > 3.0)
+                far_n += far
                 for ang, cam in cams.items():
                     uv, z = cam.project(s["pad_center"], s["R"], s["pos"])
                     u, v = uv[0]
                     vis = bool(z[0] > 0 and 0 <= u <= cam.w and 0 <= v <= cam.h)
                     seen[ang] += vis
+                    far_seen[ang] += vis and far
                     blind[ang] = 0 if vis else blind[ang] + 1
                     blind_max[ang] = max(blind_max[ang], blind[ang])
                 a, ti = teacher.act(env)
@@ -97,7 +111,7 @@ def run_task(task):
                     break
             td = info.get("touchdown") or {}
             out.append(dict(
-                stage=task["stage"], rate=task["rate"], vmax=task["vmax"], pitch=pitch,
+                stage=task["stage"], rate=task["rate"], vmax=task["vmax"], pitch=pitch, teacher=kind,
                 mode=task["mode"],
                 seed=int(seed), outcome=info["outcome"], t=int(info["t"]),
                 pad_v_start=round(float(info["pad"]["v_start"]), 3),
@@ -106,6 +120,9 @@ def run_task(task):
                 waits=int(waits), drops_asked=int(drops_asked), vetoes=int(vetoes),
                 reason=td.get("reason"), impact=td.get("impact"),
                 view60=round(seen[60] / n, 4), view45=round(seen[45] / n, 4),
+                far_share=round(far_n / n, 4),
+                far60=round(far_seen[60] / far_n, 4) if far_n else None,
+                far45=round(far_seen[45] / far_n, 4) if far_n else None,
                 blind60_s=round(blind_max[60] * POLICY_DT, 1),
                 blind45_s=round(blind_max[45] * POLICY_DT, 1)))
     finally:
@@ -114,6 +131,15 @@ def run_task(task):
 
 
 # ---------------------------------------------------------------- summary
+def farp(sub, key):
+    """Mean far-view share over the flights that HAD far steps, as ' xx.x%'; '     -' for old
+    records without it (or no far steps at all)."""
+    vals = [r[key] for r in sub if r.get(key) is not None]
+    if any(key not in r for r in sub) or not vals:
+        return "     -"
+    return f"{100 * np.mean(vals):5.1f}%"
+
+
 def summarize(recs):
     """Text table: one block per (rate, vmax)."""
     lines = []
@@ -121,10 +147,11 @@ def summarize(recs):
     for rate, vmax in settings:
         rs = [r for r in recs if r["rate"] == rate and r["vmax"] == vmax]
         cam = (f", camera {rs[0].get('pitch', 60.0):g} deg" if rs[0]["stage"] == "images" else "")
+        cam += ", VIEW-KEEPING teacher" if rs[0].get("teacher") == "view" else ""
         lines.append(f"\n=== speed-change limit {rate * 10:.0f} m/s^2, pad top speed {vmax:g} m/s{cam} "
                      f"({len(rs)} flights) ===")
         lines.append(f"{'path':9s} {'safe':>9s} {'95% interval':>14s} {'t max':>6s} {'t p99':>6s} "
-                     f"{'view60':>7s} {'view45':>7s} {'blind60':>8s} {'blind45':>8s}  failures")
+                     f"{'view60':>7s} {'view45':>7s} {'far60':>6s} {'far45':>6s} {'blind60':>8s} {'blind45':>8s}  failures")
         for mode in PATHS + ("ALL",):
             sub = rs if mode == "ALL" else [r for r in rs if r["mode"] == mode]
             if not sub:
@@ -138,6 +165,7 @@ def summarize(recs):
                 f"{t.max():5.1f}s {np.percentile(t, 99):5.1f}s "
                 f"{100 * np.mean([r['view60'] for r in sub]):6.1f}% "
                 f"{100 * np.mean([r['view45'] for r in sub]):6.1f}% "
+                f"{farp(sub, 'far60')} {farp(sub, 'far45')} "
                 f"{np.mean([r['blind60_s'] for r in sub]):7.1f}s "
                 f"{np.mean([r['blind45_s'] for r in sub]):7.1f}s  {dict(fails)}")
         ok_t = np.array([r["t"] for r in rs if r["outcome"] == "success"]) / 10.0
@@ -154,9 +182,10 @@ def summarize(recs):
 
 def out_name(args):
     if args.stage == "grid":
-        return os.path.join(OUT_DIR, "grid")
+        return os.path.join(OUT_DIR, "grid" + ("_view" if args.teacher == "view" else ""))
     name = f"{args.stage}_r{args.rate[0]:g}_v{args.vmax[0]:g}"
-    return os.path.join(OUT_DIR, name + (f"_p{args.pitch:g}" if args.stage == "images" else ""))
+    name += f"_p{args.pitch:g}" if args.stage == "images" else ""
+    return os.path.join(OUT_DIR, name + ("_view" if args.teacher == "view" else ""))
 
 
 def main(argv=None):
@@ -166,6 +195,8 @@ def main(argv=None):
     ap.add_argument("--vmax", type=float, nargs="+", default=None, help="9 and/or 8")
     ap.add_argument("--pitch", type=float, default=60.0, choices=(45.0, 60.0),
                     help="camera angle of the env (images stage)")
+    ap.add_argument("--teacher", choices=("v7", "view"), default="v7",
+                    help="v7 = S2a teacher; view = S2' view-keeping teacher (21 Nov)")
     ap.add_argument("--n", type=int, default=200, help="flights per path per setting")
     ap.add_argument("--paths", nargs="+", default=list(PATHS))
     ap.add_argument("--workers", type=int, default=8)
@@ -187,7 +218,8 @@ def main(argv=None):
         return recs
 
     seeds = [SEED0[args.stage] + i for i in range(args.n)]
-    tasks = [dict(stage=args.stage, rate=r, vmax=v, pitch=args.pitch, mode=m, seeds=seeds[i:i + CHUNK])
+    tasks = [dict(stage=args.stage, rate=r, vmax=v, pitch=args.pitch, mode=m, teacher=args.teacher,
+                  seeds=seeds[i:i + CHUNK])
              for r in args.rate for v in args.vmax for m in args.paths
              for i in range(0, len(seeds), CHUNK)]
     total = sum(len(t["seeds"]) for t in tasks)
