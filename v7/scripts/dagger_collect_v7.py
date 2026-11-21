@@ -36,6 +36,12 @@ Run (repo root; charger in; performance mode):
 Watch:  tail -f v7/results/dagger_r1_collect.log | grep --line-buffered -E "^\\[(w|dag)"
 Stop:   pkill -f "v7.scripts.dagger_collect_v7"
 Output: v7/results/dagger/r<round>/ (git-ignored): dagger_w*.npz, flights.csv, summary.txt
+
+S3v (21 Nov): --teacher view labels with the VIEW-KEEPING teacher (v7.config.make_teacher;
+default v7). One teacher per folder (teacher.txt). Example (60 deg, view teacher):
+  nohup python -m v7.scripts.dagger_collect_v7 --teacher view --ckpt v7/results/runs/bc_p60v/last.pt \\
+        --round 1 --flights 300 --workers 6 --beta 0.5 --out v7/results/p60v/dagger/r1 \\
+        > v7/results/p60v/dagger_r1_collect.log 2>&1 &
 """
 import argparse
 import csv
@@ -117,15 +123,14 @@ def fly_dagger(env, model, teacher, ep, device="cpu", beta=0.0):
     return rec, row
 
 
-def worker(w, n_workers, rnd, flights, ckpt, out, renderer, q, beta=0.0):
+def worker(w, n_workers, rnd, flights, ckpt, out, renderer, q, beta=0.0, teacher_kind="v7"):
     import torch
     torch.set_num_threads(1)
     from v6_drop.scripts.eval_student import load
-    from v7.config import make_env
-    from v7.experts.teacher_v7 import TeacherV7
+    from v7.config import make_env, make_teacher
     model, _ = load(ckpt, "cpu")
     env = make_env(renderer=renderer, seed=0)
-    teacher = TeacherV7()
+    teacher = make_teacher(teacher_kind)
     buf = {k: [] for k in KEYS}
     n_buf, chunk, rows, t0 = 0, 0, [], time.time()
     mine = [i for i in range(flights) if i % n_workers == w]
@@ -154,6 +159,8 @@ def worker(w, n_workers, rnd, flights, ckpt, out, renderer, q, beta=0.0):
 
 def summarize(rows, out, ckpt, rnd):
     rows = sorted(rows, key=lambda r: r["ep"])
+    tpath = os.path.join(out, "teacher.txt")
+    teacher_kind = open(tpath).read().strip() if os.path.exists(tpath) else "v7"
     with open(os.path.join(out, "flights.csv"), "w", newline="") as f:
         wr = csv.DictWriter(f, fieldnames=list(rows[0]))
         wr.writeheader()
@@ -167,7 +174,7 @@ def summarize(rows, out, ckpt, rnd):
     beta = rows[0]["beta"]
     lines = [f"V7 DAgger round {rnd}: student {os.path.abspath(ckpt)} flew {n} flights "
              f"(seeds {rows[0]['seed']}..{rows[-1]['seed']}), all kept; beta {beta:g} (teacher flew "
-             f"{100 * np.mean([r['teacher_share'] for r in rows]):.0f} % of the steps)",
+             f"{100 * np.mean([r['teacher_share'] for r in rows]):.0f} % of the steps); teacher: {teacher_kind}",
              f"samples {steps:,} (mean {steps / n:.0f} per flight)",
              f"{'mixed flights' if beta > 0 else 'student'} safe {len(safe)}/{n} = {100 * len(safe) / n:.1f}% "
              f"(by drop {sum(r['reason'] == 'drop' for r in safe)}, by auto-cut "
@@ -198,17 +205,21 @@ def main(argv=None):
     ap.add_argument("--out", default=None, help="default v7/results/dagger/r<round>")
     ap.add_argument("--beta", type=float, default=0.0,
                     help="chance per step that the TEACHER's action is flown (0 = pure DAgger)")
+    ap.add_argument("--teacher", choices=("v7", "view"), default="v7",
+                    help="v7 = TeacherV7 (S2a); view = view-keeping teacher (S2', 21 Nov)")
     a = ap.parse_args(argv)
     assert 0.0 <= a.beta <= 1.0, a.beta
     out = a.out or os.path.join(OUT, f"r{a.round}")
     if glob.glob(os.path.join(out, "dagger_*.npz")):
         raise SystemExit(f"{out} already has data; delete it first (rm -rf {out})")
     os.makedirs(out, exist_ok=True)
+    from v7.config import check_teacher_file
+    check_teacher_file(out, a.teacher)
     ctx = mp.get_context("spawn")
     q = ctx.Queue()
     t0 = time.time()
     procs = [ctx.Process(target=worker, args=(w, a.workers, a.round, a.flights, a.ckpt, out, a.renderer, q,
-                                              a.beta))
+                                              a.beta, a.teacher))
              for w in range(a.workers)]
     for pr in procs:
         pr.start()

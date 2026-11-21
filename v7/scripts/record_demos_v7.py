@@ -23,6 +23,12 @@ Run (repo root; charger in; `powerprofilesctl set performance`):
 Watch:  tail -f v7/results/demos.log | grep --line-buffered -E "^\\[(w|rec)"
 Stop:   pkill -f "v7.scripts.record_demos_v7"
 Output: v7/results/demos/ (git-ignored): demos_w*_*.npz, episodes.csv, summary.txt
+
+S3v (21 Nov): --teacher view records the VIEW-KEEPING teacher (v7.config.make_teacher; default
+v7 = TeacherV7, so earlier runs reproduce). One teacher per folder (teacher.txt; mixing is
+refused). Run for 60 deg with the view teacher:
+  nohup python -m v7.scripts.record_demos_v7 --teacher view --attempts 1200 --workers 6 \\
+        --out v7/results/p60v/demos > v7/results/p60v/demos.log 2>&1 &
 """
 import argparse
 import csv
@@ -88,12 +94,11 @@ def fly_and_record(env, teacher, troubles, e):
     return rec, row
 
 
-def worker(w, n_workers, start, attempts, out, renderer, q):
-    from v7.config import make_env
-    from v7.experts.teacher_v7 import TeacherV7
+def worker(w, n_workers, start, attempts, out, renderer, q, teacher_kind="v7"):
+    from v7.config import make_env, make_teacher
     from v7.experts.troubles_v7 import TroublesV7
     env = make_env(renderer=renderer, seed=0)
-    teacher, troubles = TeacherV7(), TroublesV7()
+    teacher, troubles = make_teacher(teacher_kind), TroublesV7()
     buf = {k: [] for k in KEYS + ("ep",)}
     n_buf, chunk, rows, t0 = 0, 0, [], time.time()
     mine = [e for e in range(start, start + attempts) if e % n_workers == w]
@@ -124,6 +129,8 @@ def worker(w, n_workers, start, attempts, out, renderer, q):
 
 def summarize(rows, out):
     from v7.experts.troubles_v7 import KINDS
+    tpath = os.path.join(out, "teacher.txt")
+    teacher_kind = open(tpath).read().strip() if os.path.exists(tpath) else "v7"
     rows = sorted(rows, key=lambda r: r["ep"])
     path = os.path.join(out, "episodes.csv")
     new = not os.path.exists(path)
@@ -135,7 +142,7 @@ def summarize(rows, out):
     with open(path) as f:
         allrows = list(csv.DictReader(f))
     kept_rows = [r for r in allrows if int(r["kept"])]
-    lines = [f"V7 demonstrations in {os.path.abspath(out)}"]
+    lines = [f"V7 demonstrations in {os.path.abspath(out)} (teacher: {teacher_kind})"]
     lines.append(f"attempts {len(allrows)}, kept (safe landings) {len(kept_rows)}, "
                  f"samples {sum(int(r['steps']) for r in kept_rows)}")
     for k in KINDS:
@@ -172,12 +179,17 @@ def main(argv=None):
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--renderer", choices=["egl", "tiny"], default="egl")
     ap.add_argument("--out", default=OUT)
+    ap.add_argument("--teacher", choices=("v7", "view"), default="v7",
+                    help="v7 = TeacherV7 (S2a); view = view-keeping teacher (S2', 21 Nov)")
     a = ap.parse_args(argv)
     os.makedirs(a.out, exist_ok=True)
+    from v7.config import check_teacher_file
+    check_teacher_file(a.out, a.teacher)
     ctx = mp.get_context("spawn")
     q = ctx.Queue()
     t0 = time.time()
-    procs = [ctx.Process(target=worker, args=(w, a.workers, a.start, a.attempts, a.out, a.renderer, q))
+    procs = [ctx.Process(target=worker, args=(w, a.workers, a.start, a.attempts, a.out, a.renderer, q,
+                                              a.teacher))
              for w in range(a.workers)]
     for pr in procs:
         pr.start()

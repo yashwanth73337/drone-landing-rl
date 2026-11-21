@@ -16,6 +16,7 @@ command in that same moment (m/s; heading frame), marker seen, drop chance.
 (deg/s): the gimbal camera turns with the nose, and the speed commands are in the nose's
 frame, so a drifting heading would hide the pad AND point every command the wrong way.
 --pad-speed and --mode choose the pad for Part B; --skip-a skips Part A.
+S3v (21 Nov): --teacher view compares with the VIEW-KEEPING teacher in Part B (default v7).
 
 Run (repo root):
   python -m v7.scripts.diag_student_v7 --ckpt v7/results/runs/bc_v7/last.pt
@@ -66,11 +67,10 @@ def part_a(model, data, device, scale, max_eps=None):
     return lines
 
 
-def part_b(model, device, seeds, every=5, pad_speed=2.0, mode="straight"):
-    from v7.config import make_env
+def part_b(model, device, seeds, every=5, pad_speed=2.0, mode="straight", teacher_kind="v7"):
+    from v7.config import make_env, make_teacher
     from v7.envs.platform_v7 import PAD_TOP_Z
     from v7.envs.s500 import lowest_z
-    from v7.experts.teacher_v7 import TeacherV7
     env = make_env(student_rules=True, renderer="egl", seed=7)
     lines = ["", f"Part B: the student flies alone; {mode} pad (start {pad_speed:g} m/s); every 0.5 s.",
              "  pad frame: x = ahead of the pad centre (+) / behind (-), y = left (+); height = skids",
@@ -79,7 +79,7 @@ def part_b(model, device, seeds, every=5, pad_speed=2.0, mode="straight"):
     try:
         for seed in seeds:
             obs, _ = env.reset(seed=seed, options=dict(mode=mode, pad_speed=pad_speed))
-            teacher = TeacherV7()
+            teacher = make_teacher(teacher_kind)
             teacher.reset()
             hc, k, first_bad = None, 0, None
             lines.append(f"\n  seed {seed}")
@@ -128,14 +128,16 @@ def main(argv=None):
     ap.add_argument("--skip-a", action="store_true")
     ap.add_argument("--tag", default="", help="added to the output file name")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--teacher", choices=("v7", "view"), default="v7",
+                    help="teacher to compare with in Part B (view = S2' view-keeping)")
     a = ap.parse_args(argv)
     model, _ = load(a.ckpt, a.device)
     scale = np.array([VXY_MAX, VXY_MAX, VZ_MAX, YAW_RATE_MAX])
-    lines = [f"Diagnostic of {a.ckpt}"]
+    lines = [f"Diagnostic of {a.ckpt} (teacher in Part B: {a.teacher})"]
     if not a.skip_a:
         lines += part_a(model, a.data, a.device, scale, a.max_eps)
     print("\n".join(lines), flush=True)
-    lb = part_b(model, a.device, a.seeds, pad_speed=a.pad_speed, mode=a.mode)
+    lb = part_b(model, a.device, a.seeds, pad_speed=a.pad_speed, mode=a.mode, teacher_kind=a.teacher)
     print("\n".join(lb), flush=True)
     out = os.path.join(os.path.dirname(a.ckpt),
                        f"diag_{os.path.splitext(os.path.basename(a.ckpt))[0]}{a.tag}.txt")

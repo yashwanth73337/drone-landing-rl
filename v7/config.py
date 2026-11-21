@@ -17,6 +17,12 @@
                                       STUDENT flies (Stage 1 rules); demos are recorded with
                                       the simulator's touch and no shield, as in V6
 Every V7 script after S2 builds its env with make_env(), so the settings live in one place.
+
+S3v (21 Nov 2026): make_teacher(kind) picks the teacher for demos, DAgger labels and the
+flight diagnostic. "v7" = TeacherV7 (S2a; the default, so every earlier run reproduces);
+"view" = TeacherV7View (S2', view-keeping: climbs and turns the nose to keep the pad in the
+picture while far; tuned for the camera angle PITCH_DEG). Runs with the view teacher go to
+v7/results/p60v/ and runs/*_p60v.
 """
 from .envs import world_v7 as W7
 
@@ -26,6 +32,7 @@ V_MAX = 9.0
 HORIZON = W7.HORIZON            # 600 decisions = 60 s
 DROP_SHIELD = 0.8
 assert HORIZON == 600
+TEACHERS = ("v7", "view")
 
 
 def make_env(student_rules=False, **kw):
@@ -37,3 +44,32 @@ def make_env(student_rules=False, **kw):
         base.update(touch="sensor", drop_shield=DROP_SHIELD)
     base.update(kw)
     return LandingEnvV7(**base)
+
+
+def make_teacher(kind="v7"):
+    """The privileged teacher: "v7" (TeacherV7, S2a) or "view" (TeacherV7View, S2', for the
+    camera angle PITCH_DEG)."""
+    if kind == "v7":
+        from .experts.teacher_v7 import TeacherV7
+        return TeacherV7()
+    if kind == "view":
+        from .experts.teacher_view_v7 import TeacherV7View
+        return TeacherV7View(pitch_deg=PITCH_DEG)
+    raise ValueError(f"teacher kind {kind!r}, expected one of {TEACHERS}")
+
+
+def check_teacher_file(out, kind):
+    """One teacher per data folder. Writes <out>/teacher.txt on first use; refuses to add data
+    made by a different teacher (a folder without the file = old data, made by "v7")."""
+    import os
+    path = os.path.join(out, "teacher.txt")
+    if os.path.exists(path):
+        have = open(path).read().strip()
+    elif any(f.endswith(".npz") for f in os.listdir(out)):
+        have = "v7"
+    else:
+        have = None
+    if have is not None and have != kind:
+        raise SystemExit(f"{out} holds data from teacher {have!r}, not {kind!r}: use another --out")
+    with open(path, "w") as f:
+        f.write(kind + "\n")
