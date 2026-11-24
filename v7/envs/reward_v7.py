@@ -4,16 +4,45 @@ The SAME formulas and numbers as V6 (v6_drop/envs/reward.py). Only one value cha
 the standing height used for the feet height, h_feet = h - REST_HEIGHT, is the S500's
 0.22 m (V6: 0.152 m, the old legs).
 
-The reward itself is NOT final for V7. It is discussed with Yashwanth before any PPO run
-(step R, 25 to 26 Nov): time cost over 60 s, blind penalty during a long chase, progress
-while the pad pulls away, gamma 0.99 vs 0.995, slide after landing on a braking pad.
+STEP R (24 Nov 2026, decided by Yashwanth, "yes R"): two END MARKS change, all else as V6.
+  unsafe landing (slide_off, tip_over, not_still)   -3  ->  -8
+  hard landing (impact > 1.0 m/s)   -2 (impact - 1), floor -10  ->  -8 - 2 (impact - 1), floor -10
+Why: over 60 s flights the time cost alone adds up to -6, so with the V6 values a tip-over
+at 20 s (-3 - 2 = -5) or a hard landing at 1.2 m/s (-0.4 - 2) scored BETTER than a safe hover
+until the timeout (about -6): PPO would learn that a risky or slammed landing is worth it.
+New order: success (+10 to +16) > timeout (0, with the time cost ~ -6) > unsafe landing (-8)
+> hard landing (-8 to -10, slower always better) > crash / lost (-10). PPO still tries to
+land when its chance of a safe landing is above ~10 %.
+Kept (his decision): success marks and bonuses (air-drop-only option), crash/lost -10,
+timeout 0, time -0.01 per step, blind -0.05 per step, the V6 progress potential, gamma 0.99
+(in the PPO script). Slide after landing on a braking pad: the referee's 2 s check already
+gives slide_off (now -8).
 """
+import numpy as np
+
 from v6_drop.envs import reward as R6
-from v6_drop.envs.reward import TIME_PENALTY, VISIBILITY_PENALTY, end_mark, geometry_from_body
+from v6_drop.envs.reward import TIME_PENALTY, VISIBILITY_PENALTY, geometry_from_body
 
 from .s500 import REST_HEIGHT
 
-__all__ = ["potential", "RewardV7", "geometry_from_body", "REST_HEIGHT"]
+__all__ = ["potential", "end_mark", "RewardV7", "geometry_from_body", "REST_HEIGHT"]
+
+UNSAFE_ON_PAD = -8.0          # step R (V6: -3)
+HARD_BASE = -8.0              # step R: hard landing starts at the unsafe value ...
+HARD_SLOPE = R6.HARD_SLOPE    # ... and loses 2 per m/s above 1.0 m/s (as V6)
+HARD_FLOOR = R6.HARD_FLOOR    # -10 (= a crash) from 2.0 m/s
+END_MARKS = dict(R6.END_MARKS, slide_off=UNSAFE_ON_PAD, tip_over=UNSAFE_ON_PAD,
+                 not_still=UNSAFE_ON_PAD)
+
+
+def end_mark(outcome, touchdown, air_drop_only=False):
+    """V7 end mark (step R). success: exactly V6 (10 + centre + soft + drop bonus)."""
+    if outcome == "success":
+        return R6.end_mark(outcome, touchdown, air_drop_only)
+    if outcome == "hard_landing":
+        excess = float(touchdown["impact"]) - R6.V_IMPACT_MAX
+        return max(HARD_FLOOR, HARD_BASE - HARD_SLOPE * excess)
+    return END_MARKS[outcome]
 
 
 def potential(d, h):
