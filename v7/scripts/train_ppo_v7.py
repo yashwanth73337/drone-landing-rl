@@ -26,6 +26,18 @@ What is V7 here (nothing else changes):
            "model" (the flying Student) is used; a helper head ("aux") is not trained here.
   guard    --guard G: stop if a dev exam is below G % (default 10: only a collapse stops it;
            the starting student is ~31 %).
+A/B 24 Nov (his choice after the dev test 263/400 and the fast-pad diagnostic):
+  --reward-source true   the PROGRESS part of the reward uses the simulator's true distance and
+           height instead of the camera's (reward_v7 / V6 reward source="true", built for the
+           Stage 1 ablation). Why: on fast pads the pad gets ~15 m ahead and out of view; with
+           the camera source the progress PAUSES while blind, so chasing straight and fast
+           earns nothing over wobbling. The blind mark (-0.05) still follows the camera, the
+           end marks are unchanged, and the drone still flies on the camera only (the reward
+           exists only in training). Default camera = the run so far exactly.
+  --critic-rewarm N      after the start or a resume, the actor is frozen for N rounds and only
+           the critic learns (a new reward source changes the values the critic must predict).
+           Default 0 = as before. Both A/B arms use the same N.
+  --resume X --name NEW  continues checkpoint X into a NEW folder (X is not changed).
 Checkpoints: v7/results/runs/<name>/last.pt every round, r<round>.pt at each exam ("model" =
 the student, so eval_student_v7 reads them as they are), metrics.csv, exam_r<round>.csv.
 
@@ -62,9 +74,10 @@ def sigma_norm(sigma=SIGMA):
     return s / scale
 
 
-def make_env_ppo(renderer, seed=0):
+def make_env_ppo(renderer, seed=0, reward_source="camera"):
     from v7.config import make_env
-    return make_env(student_rules=True, air_drop_bonus=True, renderer=renderer, seed=seed)
+    return make_env(student_rules=True, air_drop_bonus=True, renderer=renderer, seed=seed,
+                    reward_source=reward_source)
 
 
 def train_seed(w, k):
@@ -98,12 +111,12 @@ def fly_clean(env, student, mode, seed):
 
 
 # ------------------------------------------------------------------ worker process
-def worker(w, cmd_q, res_q, renderer, sigma, run_seed):
+def worker(w, cmd_q, res_q, renderer, sigma, run_seed, reward_source="camera"):
     import torch
     torch.set_num_threads(1)
     from v6_drop.learn import ppo as PPO
     model = PPO.ActorCritic(sigma_n=sigma_norm(sigma)).eval()
-    env = make_env_ppo(renderer)
+    env = make_env_ppo(renderer, reward_source=reward_source)
     rng = np.random.default_rng([int(run_seed), w, 11])
     ep_count, need_reset, obs, hc = 0, True, None, None
     ep = {}
@@ -221,6 +234,10 @@ def main(argv=None):
     ap.add_argument("--exam-n", type=int, default=25, help="dev exam flights PER PATH (4 paths)")
     ap.add_argument("--guard", type=float, default=10.0, help="stop if a dev exam is below this %")
     ap.add_argument("--sigma", type=float, nargs=4, default=list(SIGMA))
+    ap.add_argument("--reward-source", choices=["camera", "true"], default="camera",
+                    help="progress from the camera (default, the run so far) or the simulator truth")
+    ap.add_argument("--critic-rewarm", type=int, default=0,
+                    help="rounds after start/resume with the actor frozen (critic only)")
     ap.add_argument("--renderer", choices=["egl", "tiny"], default="egl")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--seed", type=int, default=0)
@@ -255,14 +272,17 @@ def main(argv=None):
     print(f"[ppo] V7: 60 deg camera, shield 0.8, touch sensor, air-drop bonus, step R end marks; "
           f"gamma {a.gamma}; noise {a.sigma} (policy units {np.round(sigma_norm(a.sigma), 4).tolist()}); "
           f"{a.workers} workers x {a.steps} steps; exam {4 * a.exam_n} dev flights every {a.exam_every} rounds; "
-          f"guard {a.guard:g} %", flush=True)
-    cfg = dict(vars(a), version="v7", training_seed0=ROLL_SEED0, dev_seed0=DEV_SEED0)
+          f"guard {a.guard:g} %; progress reward from the {a.reward_source.upper()}"
+          + (f"; critic re-warm-up {a.critic_rewarm} rounds (actor frozen)" if a.critic_rewarm else ""),
+          flush=True)
+    cfg = dict(vars(a), version="v7", training_seed0=ROLL_SEED0, dev_seed0=DEV_SEED0, start_round=start)
     json.dump(cfg, open(os.path.join(out, "config.json"), "w"), indent=1)
 
     ctx = mp.get_context("spawn")
     cmd_qs = [ctx.Queue() for _ in range(a.workers)]
     res_q = ctx.Queue()
-    procs = [ctx.Process(target=worker, args=(w, cmd_qs[w], res_q, a.renderer, a.sigma, a.seed), daemon=True)
+    procs = [ctx.Process(target=worker, args=(w, cmd_qs[w], res_q, a.renderer, a.sigma, a.seed, a.reward_source),
+                         daemon=True)
              for w in range(a.workers)]
     for p in procs:
         p.start()
@@ -279,7 +299,8 @@ def main(argv=None):
                 print(f"[ppo] critic warm-up done (explained variance {ev_last:.2f}); PPO from round {rnd}",
                       flush=True)
             k = 0 if ppo_start is None else rnd - ppo_start
-            lr_a = 0.0 if ppo_start is None else a.lr_actor * min(1.0, (k + 1) / a.actor_warmup)
+            rewarm = rnd < start + a.critic_rewarm
+            lr_a = 0.0 if (ppo_start is None or rewarm) else a.lr_actor * min(1.0, (k + 1) / a.actor_warmup)
             t0 = time.time()
             sd = T6.cpu_state(model)
             for q in cmd_qs:
@@ -296,7 +317,8 @@ def main(argv=None):
             roll["target"] = tgt.astype(np.float32)
             chunks = PPO.make_chunks(roll, a.chunk)
             model.train()
-            m = T6.learn(model, opt_a, opt_c, chunks, a, device, train_actor=ppo_start is not None, lr_a=lr_a)
+            m = T6.learn(model, opt_a, opt_c, chunks, a, device,
+                         train_actor=ppo_start is not None and not rewarm, lr_a=lr_a)
             model.eval()
             ev_last = ev
             n_dec = a.workers * a.steps
@@ -309,7 +331,8 @@ def main(argv=None):
             outs = {}
             for f in flights:
                 outs[f["outcome"]] = outs.get(f["outcome"], 0) + 1
-            row = dict(round=rnd, phase="ppo" if ppo_start is not None else "critic", steps=steps,
+            row = dict(round=rnd, phase=("critic" if ppo_start is None else "rewarm" if rewarm else "ppo"),
+                       steps=steps,
                        flights=nf, safe_pct=round(100 * safe / nf, 1) if nf else None,
                        drop_pct=round(100 * drops / nf, 1) if nf else None,
                        hard=outs.get("hard_landing", 0),
@@ -338,7 +361,7 @@ def main(argv=None):
                   f"{row['t_collect']:.0f}+{row['t_learn']:.0f} s, {row['dps']:.0f} dec/s", flush=True)
             T6.save(os.path.join(out, "last.pt"), model, opt_a, opt_c, rnd, steps, ppo_start, ev_last, cfg)
             last_round = rnd == a.rounds - 1
-            if ppo_start is not None and ((k + 1) % a.exam_every == 0 or last_round):
+            if ppo_start is not None and not rewarm and ((k + 1) % a.exam_every == 0 or last_round):
                 rows = run_exam(cmd_qs, res_q, model, a.exam_n)
                 line, k_safe = exam_line(rows, rnd)
                 print(line, flush=True)
