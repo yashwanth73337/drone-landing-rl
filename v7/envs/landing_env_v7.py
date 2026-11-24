@@ -52,7 +52,8 @@ class LandingEnvV7(E6.LandingEnv):
     def __init__(self, renderer="egl", seed=0, gains_mode="random", layout=PB.DEFAULT_LAYOUT,
                  reward_source="camera", headless=False, drop_shield=None,
                  touch="perfect", touch_cfg=None, air_drop_bonus=False, sensor_noise=None,
-                 veto_cost=0.0, pitch_deg=PITCH_DEG, mode="random", v_max=V_MAX, rate_xy=0.3):
+                 veto_cost=0.0, pitch_deg=PITCH_DEG, mode="random", v_max=V_MAX, rate_xy=0.3,
+                 gimbal_schedule="none"):
         gym.Env.__init__(self)
         assert rate_xy in RATE_XY_OPTIONS, rate_xy
         self.headless = bool(headless)
@@ -70,7 +71,8 @@ class LandingEnvV7(E6.LandingEnv):
         self.noise = None if sensor_noise in (None, "none") else SensorNoise(sensor_noise, seed=seed)
         self.world = WorldV7(renderer=renderer, layout=layout, seed=seed, gains_mode=gains_mode,
                              touch=touch, touch_cfg=touch_cfg, noise=self.noise,
-                             pitch_deg=pitch_deg, mode=mode, v_max=v_max)
+                             pitch_deg=pitch_deg, mode=mode, v_max=v_max,
+                             gimbal_schedule=gimbal_schedule)
         f32 = np.float32
         self.observation_space = spaces.Dict({
             "image": spaces.Box(0, 255, (OBS_H, OBS_W), np.uint8),

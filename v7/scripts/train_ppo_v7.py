@@ -38,6 +38,9 @@ A/B 24 Nov (his choice after the dev test 263/400 and the fast-pad diagnostic):
            the critic learns (a new reward source changes the values the critic must predict).
            Default 0 = as before. Both A/B arms use the same N.
   --resume X --name NEW  continues checkpoint X into a NEW folder (X is not changed).
+S4g 25 Nov ("yes gimbal"): --gimbal-schedule h3to6 tilts the gimbal by height (60 deg
+           below 3 m, 45 deg above 6 m; v7/envs/world_v7.py GIMBAL_SCHEDULES) in training
+           flights AND exams. Default none = fixed 60 deg.
 Checkpoints: v7/results/runs/<name>/last.pt every round, r<round>.pt at each exam ("model" =
 the student, so eval_student_v7 reads them as they are), metrics.csv, exam_r<round>.csv.
 
@@ -74,10 +77,10 @@ def sigma_norm(sigma=SIGMA):
     return s / scale
 
 
-def make_env_ppo(renderer, seed=0, reward_source="camera"):
+def make_env_ppo(renderer, seed=0, reward_source="camera", gimbal_schedule="none"):
     from v7.config import make_env
     return make_env(student_rules=True, air_drop_bonus=True, renderer=renderer, seed=seed,
-                    reward_source=reward_source)
+                    reward_source=reward_source, gimbal_schedule=gimbal_schedule)
 
 
 def train_seed(w, k):
@@ -111,12 +114,12 @@ def fly_clean(env, student, mode, seed):
 
 
 # ------------------------------------------------------------------ worker process
-def worker(w, cmd_q, res_q, renderer, sigma, run_seed, reward_source="camera"):
+def worker(w, cmd_q, res_q, renderer, sigma, run_seed, reward_source="camera", gimbal_schedule="none"):
     import torch
     torch.set_num_threads(1)
     from v6_drop.learn import ppo as PPO
     model = PPO.ActorCritic(sigma_n=sigma_norm(sigma)).eval()
-    env = make_env_ppo(renderer, reward_source=reward_source)
+    env = make_env_ppo(renderer, reward_source=reward_source, gimbal_schedule=gimbal_schedule)
     rng = np.random.default_rng([int(run_seed), w, 11])
     ep_count, need_reset, obs, hc = 0, True, None, None
     ep = {}
@@ -238,6 +241,7 @@ def main(argv=None):
                     help="progress from the camera (default, the run so far) or the simulator truth")
     ap.add_argument("--critic-rewarm", type=int, default=0,
                     help="rounds after start/resume with the actor frozen (critic only)")
+    ap.add_argument("--gimbal-schedule", default="none", help="S4g: none (fixed 60 deg) or h3to6")
     ap.add_argument("--renderer", choices=["egl", "tiny"], default="egl")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--seed", type=int, default=0)
@@ -273,7 +277,8 @@ def main(argv=None):
           f"gamma {a.gamma}; noise {a.sigma} (policy units {np.round(sigma_norm(a.sigma), 4).tolist()}); "
           f"{a.workers} workers x {a.steps} steps; exam {4 * a.exam_n} dev flights every {a.exam_every} rounds; "
           f"guard {a.guard:g} %; progress reward from the {a.reward_source.upper()}"
-          + (f"; critic re-warm-up {a.critic_rewarm} rounds (actor frozen)" if a.critic_rewarm else ""),
+          + (f"; critic re-warm-up {a.critic_rewarm} rounds (actor frozen)" if a.critic_rewarm else "")
+          + (f"; GIMBAL SCHEDULE {a.gimbal_schedule}" if a.gimbal_schedule != "none" else ""),
           flush=True)
     cfg = dict(vars(a), version="v7", training_seed0=ROLL_SEED0, dev_seed0=DEV_SEED0, start_round=start)
     json.dump(cfg, open(os.path.join(out, "config.json"), "w"), indent=1)
@@ -281,7 +286,8 @@ def main(argv=None):
     ctx = mp.get_context("spawn")
     cmd_qs = [ctx.Queue() for _ in range(a.workers)]
     res_q = ctx.Queue()
-    procs = [ctx.Process(target=worker, args=(w, cmd_qs[w], res_q, a.renderer, a.sigma, a.seed, a.reward_source),
+    procs = [ctx.Process(target=worker, args=(w, cmd_qs[w], res_q, a.renderer, a.sigma, a.seed, a.reward_source,
+                                              a.gimbal_schedule),
                          daemon=True)
              for w in range(a.workers)]
     for p in procs:

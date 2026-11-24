@@ -52,7 +52,8 @@ def run_task(task):
     torch.set_num_threads(1)
     device = task.get("device") or ("cuda" if torch.cuda.is_available() else "cpu")
     model, _ = load(task["ckpt"], device)
-    env = make_env(student_rules=True, renderer="egl", seed=7)
+    env = make_env(student_rules=True, renderer="egl", seed=7,
+                   gimbal_schedule=task.get("gimbal_schedule", "none"))
     out = []
     try:
         for seed in task["seeds"]:
@@ -131,16 +132,21 @@ def main(argv=None):
     ap.add_argument("--device", default=None)
     ap.add_argument("--out", default=None, help="file name without extension")
     ap.add_argument("--summary-only", action="store_true")
+    ap.add_argument("--gimbal-schedule", default="none",
+                    help="S4g: gimbal tilt by height (h3to6 = 60 deg below 3 m, 45 deg above 6 m)")
     a = ap.parse_args(argv)
     stem = os.path.splitext(os.path.basename(a.ckpt))[0]
-    base = a.out or os.path.join(os.path.dirname(a.ckpt), f"dev_{stem}_{a.n}")
-    title = f"{a.ckpt}, dev seeds {a.seed0}+, student rules"
+    gs = "" if a.gimbal_schedule == "none" else f"_g{a.gimbal_schedule}"
+    base = a.out or os.path.join(os.path.dirname(a.ckpt), f"dev_{stem}_{a.n}{gs}")
+    title = f"{a.ckpt}, dev seeds {a.seed0}+, student rules" + (
+        f", gimbal schedule {a.gimbal_schedule}" if gs else "")
     if a.summary_only:
         recs = [json.loads(x) for x in open(base + ".jsonl")]
         print(summarize(recs, title))
         return recs
     seeds = [a.seed0 + i for i in range(a.n)]
-    tasks = [dict(ckpt=a.ckpt, mode=m, seeds=seeds[i:i + CHUNK], device=a.device)
+    tasks = [dict(ckpt=a.ckpt, mode=m, seeds=seeds[i:i + CHUNK], device=a.device,
+                  gimbal_schedule=a.gimbal_schedule)
              for m in a.paths for i in range(0, len(seeds), CHUNK)]
     total = len(seeds) * len(a.paths)
     print(f"[dev] {a.ckpt}: {total} flights, {a.workers} workers -> {base}.jsonl", flush=True)

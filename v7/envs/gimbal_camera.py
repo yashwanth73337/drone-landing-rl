@@ -15,6 +15,11 @@ Image: the same as V6 (512 x 320 grey, 90 deg horizontal view, fx = fy = 256 px)
 ASSUMED until measured on the lab drone: the mount position and that the gimbal is ideal
 (no lag, no limits). Real gimbals lag a little and stop at their angle limits.
 
+S4g (25 Nov 2026, "yes gimbal"): the gimbal can also TILT during a flight: set_pitch()
+changes the angle below the horizon; the camera axes, marker reading and projection of the
+next frame use the new angle (WorldV7 sets it from the drone's height before each frame,
+see GIMBAL_SCHEDULES in world_v7.py).
+
 Marker reading: the V6 code (pad_board.measure) is reused. It needs the camera axes in
 the BODY frame (axis_b, up_b); a gimbal camera's body-frame axes change with every lean,
 so render() and pose_world() update them for the attitude of that frame, and
@@ -42,6 +47,11 @@ class GimbalCamera(Camera):
         super().__init__(client, **kw)
         self.pitch_deg = float(pitch_deg)
         self.mount_b = np.asarray(mount_b, float)
+        self._a = np.radians(self.pitch_deg)
+
+    def set_pitch(self, pitch_deg):
+        """Tilt the gimbal: the camera looks pitch_deg below the horizon from the next frame."""
+        self.pitch_deg = float(pitch_deg)
         self._a = np.radians(self.pitch_deg)
 
     def world_axes(self, R):

@@ -48,14 +48,42 @@ LOST_Z = W6.LOST_Z                 # 12 m above the pad top (unchanged)
 GROUND_HALF = 2000.0               # m, half side of the grey ground picture
 REST_HEIGHT = s500.REST_HEIGHT     # 0.22 m (V6: 0.152)
 
+# S4g (25 Nov 2026, decided by Yashwanth: "yes gimbal"): the gimbal TILTS with the drone's
+# height. Why: on fast pads the pad gets ~15 m ahead from rest; at 60 deg the top of the
+# picture is 28 deg below the horizon, so even at 6 m the camera sees only ~11 m ahead and
+# the student flies blind. At 45 deg the top edge is 13 deg below the horizon (~26 m ahead
+# at 6 m); the S2' study: far from the pad the pad centre was in view 99.7 % of the time at
+# 45 deg vs 75.7 % at 60 deg. 45 deg was dropped only for the last metres (the pad slips
+# under the camera), so the schedule keeps 60 deg when low.
+#   height h = drone body height above the pad TOP minus the standing height (~ skid
+#   height when level; onboard: altimeter minus the vehicle's known deck height)
+#   pitch = 60 deg for h <= h_lo, 45 deg for h >= h_hi, linear between.
+# The START of a flight is still chosen with the BASE pitch (60), so every seed starts in
+# exactly the same place as without the schedule (paired comparisons); the first picture
+# is then taken at the scheduled pitch. None = fixed pitch (the default, all earlier runs).
+GIMBAL_SCHEDULES = {"none": None, "h3to6": (3.0, 6.0, 60.0, 45.0)}
+
+
+def scheduled_pitch(schedule, height):
+    """Gimbal pitch [deg below the horizon] for a schedule (h_lo, h_hi, pitch_lo, pitch_hi)."""
+    h_lo, h_hi, p_lo, p_hi = schedule
+    w = float(np.clip((height - h_lo) / (h_hi - h_lo), 0.0, 1.0))
+    return p_lo + w * (p_hi - p_lo)
+
 
 class WorldV7(W6.World):
     """V6 World with the V7 pad, the S500 drone and the gimbal camera."""
 
     def __init__(self, renderer="egl", layout=PB.DEFAULT_LAYOUT, seed=0, gains_mode="random",
                  touch="perfect", touch_cfg=None, noise=None,
-                 pitch_deg=PITCH_DEG, mode="random", v_max=V_MAX):
+                 pitch_deg=PITCH_DEG, mode="random", v_max=V_MAX, gimbal_schedule="none"):
         assert touch in W6.TOUCH_MODES, touch
+        assert gimbal_schedule in GIMBAL_SCHEDULES, gimbal_schedule
+        self.gimbal_schedule = GIMBAL_SCHEDULES[gimbal_schedule]
+        self.gimbal_schedule_name = gimbal_schedule
+        self.base_pitch = float(pitch_deg)
+        if self.gimbal_schedule is not None:
+            assert self.gimbal_schedule[2] == self.base_pitch, "schedule must start at the base pitch"
         assert mode in MODES, mode
         if renderer == "egl" and W6.World._egl_open > 0:
             raise RuntimeError("an EGL World is already open in this process; "
@@ -115,6 +143,8 @@ class WorldV7(W6.World):
         flight ("random", "straight", "wave", "corners"; None = the World's mode).
         plan: fixed list of driver pieces (tests). spawn: as V6 (tests only)."""
         mode = self.mode if mode is None else mode
+        if self.gimbal_schedule is not None:
+            self.cam.set_pitch(self.base_pitch)            # starts chosen as without the schedule
         self.plat.reset(self.rng_pad, xy=(0.0, 0.0), psi=0.0, v=pad_speed, mode=mode,
                         plan=plan, v_max=self.v_max)
         tries, img, meas = 0, None, None
@@ -159,10 +189,21 @@ class WorldV7(W6.World):
             self.detector.reset()
         if self.noise is not None:
             self.noise.reset()
-        if img is None:
-            img = self.render()
+        if img is None or self.gimbal_schedule is not None:
+            img = self.render()                            # (schedule: first picture at its pitch)
             meas = self.measure(img)
         return dict(image=img, spawn=spawn, measurement=meas, tries=tries)
+
+    # ---- gimbal tilt (S4g) -----------------------------------------------------------
+    def gimbal_height(self, pos):
+        """Height used by the gimbal schedule: body above the pad top minus the standing height."""
+        return float(pos[2] - PAD_TOP_Z - REST_HEIGHT)
+
+    def render(self):
+        s = self.quad.state()
+        if self.gimbal_schedule is not None:
+            self.cam.set_pitch(scheduled_pitch(self.gimbal_schedule, self.gimbal_height(s["pos"])))
+        return self.cam.render(s["R"], s["pos"])
 
     # ---- one decision (V6 World.step; only HORIZON, LOST_XY and the pad report differ) --
     def step(self, cmd, drop=False):
